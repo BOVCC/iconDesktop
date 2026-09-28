@@ -3,6 +3,8 @@
 
   "_mode": "onefile=单个 exe（现在的方式，分发方便，但打包慢、每次启动要自解压）；onedir=一个文件夹（打包和启动都快很多，分发时把整个 dist\\名字 文件夹压缩发出去）",
 
+  "_config_location": "配置与「快捷方式」文件夹的存放位置：exe=便携版，跟随 exe 所在目录（默认）；appdata=安装版，放在 C 盘 %APPDATA%\\iconDesktop（适合把 exe 放进只读目录或做安装包分发）。安装版产物名自动加 _appdata 后缀与便携版区分，打包时也可用 --config-location appdata 临时指定",
+
   "_strip_binaries": "从产物中剔除的文件名片段（不区分大小写，匹配目标路径）。默认清单剔除了本应用用不到的大块头：软件渲染 OpenGL（opengl32sw）、QtQuick/Qml/Pdf/虚拟键盘/网络整条链、Qt 从 PATH 误抓的 MySQL OpenSSL（libcrypto-3-x64 / libssl-3-x64）、win32com 拖进来的 MFC（pythonwin/mfc140u/win32ui），合计约 60MB。打包后若功能缺失，删掉对应片段再打包；设为 [] 则不剔除任何文件",
 
   "_collect": "用 collect_submodules 整包收集的包。.lnk 解析需要 win32com；想再省几 MB 可改成 [\"win32com.client\"]（更精简），但万一 .lnk 解析异常就改回来",
@@ -24,8 +26,9 @@
   "mode": "onefile",
   "name": "iconDesktop",
   "entry": "main.py",
+  "config_location": "exe",
   "console": false,
-  "icon": null,
+  "icon": "icon/iconDesktop.ico",
   "version_file": null,
   "upx": false,
   "clean": false,
@@ -52,7 +55,7 @@
     "mfc140u",
     "win32ui"
   ],
-  "datas": [],
+  "datas": [["icon/iconDesktop.ico", "icon"]],
   "dist_path": "dist",
   "work_path": "build",
   "python": null

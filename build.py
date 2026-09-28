@@ -5,6 +5,7 @@
 日常用法（打包参数都在 build_config.json 里改，本脚本一般不带参数运行）：
     python build.py                 # 按 build_config.json 打包
     python build.py --mode onedir   # 本次临时改用 onedir 模式（不改动 JSON）
+    python build.py --config-location appdata   # 本次打「安装版」：配置放 C 盘
     python build.py --clean         # 清空 PyInstaller 缓存，全量重建
     python build.py --print-spec    # 只打印将生成的 spec 内容，不打包
 """
@@ -38,6 +39,7 @@ DEFAULTS = {
     "hiddenimports": [],
     "strip_binaries": [],
     "datas": [],
+    "config_location": "exe",
     "dist_path": "dist",
     "work_path": "build",
     "python": None,
@@ -66,6 +68,8 @@ def load_config(path: Path, overrides: dict) -> dict:
     # ---- 校验 ----
     if cfg["mode"] not in ("onefile", "onedir"):
         fail(f"mode 只能是 onefile 或 onedir，当前是 {cfg['mode']!r}")
+    if cfg["config_location"] not in ("exe", "appdata"):
+        fail(f"config_location 只能是 exe 或 appdata，当前是 {cfg['config_location']!r}")
     if not cfg["name"] or any(c in cfg["name"] for c in "/\\"):
         fail(f"name 不能为空且不能含路径分隔符，当前是 {cfg['name']!r}")
     if str(cfg["log_level"]).upper() not in ("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "FATAL", "CRITICAL"):
@@ -109,7 +113,34 @@ def load_config(path: Path, overrides: dict) -> dict:
 
     cfg["_dist"] = (path.parent / cfg["dist_path"]).resolve()
     cfg["_work"] = (path.parent / cfg["work_path"]).resolve()
+
+    # 安装版（appdata）：产物加后缀与便携版区分，并通过运行时钩子注入
+    # 数据目录环境变量（见 app/scanner.py 的 data_dir）
+    if cfg["config_location"] == "appdata":
+        cfg["_product_name"] = f"{cfg['name']}_appdata"
+        cfg["_rthook"] = str(cfg["_work"] / "rthook_config_location.py")
+        cfg["_runtime_hooks"] = [cfg["_rthook"]]
+    else:
+        cfg["_product_name"] = cfg["name"]
+        cfg["_rthook"] = None
+        cfg["_runtime_hooks"] = []
     return cfg
+
+
+def write_config_hook(cfg: dict) -> None:
+    """生成安装版的运行时钩子：在入口脚本执行前设置数据目录环境变量。"""
+    if not cfg["_rthook"]:
+        return
+    hook = Path(cfg["_rthook"])
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        "# 本文件由 build.py 自动生成，请勿手改。\n"
+        "# 安装版：把 config.json 与「快捷方式」文件夹定位到 C 盘 %APPDATA%。\n"
+        "import os\n"
+        "\n"
+        'os.environ.setdefault("ICONDESKTOP_CONFIG_LOCATION", "appdata")\n',
+        encoding="utf-8",
+    )
 
 
 def build_spec_text(cfg: dict) -> str:
@@ -138,7 +169,7 @@ def build_spec_text(cfg: dict) -> str:
         "    hiddenimports=hiddenimports,",
         "    hookspath=[],",
         "    hooksconfig={},",
-        "    runtime_hooks=[],",
+        f"    runtime_hooks={cfg['_runtime_hooks']!r},",
         f"    excludes={cfg['excludes']!r},",
         "    noarchive=False,",
         ")",
@@ -161,7 +192,7 @@ def build_spec_text(cfg: dict) -> str:
     ]
 
     exe_common = [
-        f"    name={cfg['name']!r},",
+        f"    name={cfg['_product_name']!r},",
         "    debug=False,",
         "    bootloader_ignore_signals=False,",
         "    strip=False,",
@@ -195,7 +226,7 @@ def build_spec_text(cfg: dict) -> str:
             "    strip=False,",
             f"    upx={bool(cfg['upx'])!r},",
             "    upx_exclude=[],",
-            f"    name={cfg['name']!r},",
+            f"    name={cfg['_product_name']!r},",
             ")",
         ]
     return "\n".join(lines) + "\n"
@@ -226,6 +257,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="按 build_config.json 调用 PyInstaller 打包 iconDesktop")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="配置文件路径（默认 build_config.json）")
     parser.add_argument("--mode", choices=("onefile", "onedir"), help="临时覆盖配置里的 mode（不改动 JSON）")
+    parser.add_argument(
+        "--config-location",
+        choices=("exe", "appdata"),
+        help="临时覆盖配置里的 config_location：exe=配置跟随 exe；appdata=配置放 C 盘 %%APPDATA%（产物名加 _appdata 后缀）",
+    )
     parser.add_argument("--clean", action="store_true", help="清空 PyInstaller 缓存后全量重建")
     parser.add_argument("--print-spec", action="store_true", help="只打印生成的 spec，不执行打包")
     args = parser.parse_args()
@@ -233,6 +269,8 @@ def main() -> None:
     overrides = {}
     if args.mode:
         overrides["mode"] = args.mode
+    if args.config_location:
+        overrides["config_location"] = args.config_location
     if args.clean:
         overrides["clean"] = True
 
@@ -244,6 +282,7 @@ def main() -> None:
         return
 
     GENERATED_SPEC.write_text(spec_text, encoding="utf-8")
+    write_config_hook(cfg)
 
     cmd = [
         cfg["_python"], "-m", "PyInstaller",
@@ -258,8 +297,10 @@ def main() -> None:
         cmd.append("--clean")
 
     extra = "，clean=全量重建" if cfg["clean"] else ""
-    print(f"[1/2] 开始打包（mode={cfg['mode']}{extra}）...")
+    print(f"[1/2] 开始打包（mode={cfg['mode']}，config={cfg['config_location']}{extra}）...")
     print(f"      {' '.join(cmd)}")
+    if cfg["config_location"] == "appdata":
+        print("      安装版：配置与「快捷方式」文件夹将位于 C 盘 %APPDATA%\\iconDesktop")
 
     start = time.perf_counter()
     try:
@@ -271,7 +312,7 @@ def main() -> None:
     if result.returncode != 0:
         fail(f"PyInstaller 退出码 {result.returncode}，打包失败（用时 {elapsed:.1f} 秒）")
 
-    product = (cfg["_dist"] / cfg["name"]) if cfg["mode"] == "onedir" else (cfg["_dist"] / f"{cfg['name']}.exe")
+    product = (cfg["_dist"] / cfg["_product_name"]) if cfg["mode"] == "onedir" else (cfg["_dist"] / f"{cfg['_product_name']}.exe")
     if not product.exists():
         fail(f"打包结束但找不到产物：{product}")
 

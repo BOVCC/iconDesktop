@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>iconDesktop 图标 · 定稿</title>
+<style>
+  body { background:#0b0f17; color:#e6e9f0; font-family:"Segoe UI",system-ui,sans-serif; margin:0; padding:32px 40px; }
+  h1 { font-size:18px; font-weight:600; margin:0 0 4px; }
+  p.sub { color:#8b93a7; font-size:13px; margin:0 0 8px; }
+  h2 { font-size:13px; font-weight:600; color:#aab2c5; margin:32px 0 12px; letter-spacing:.4px; }
+  .row { display:flex; align-items:flex-start; gap:14px; flex-wrap:wrap; }
+  .cell { text-align:center; }
+  .cell .s { font-size:11px; color:#6b7386; margin-top:6px; }
+  .pad { padding:14px; border-radius:10px; display:inline-block; }
+  .dark { background:#161b26; }
+  .white { background:#ffffff; }
+  canvas { display:block; }
+  .taskbar { display:inline-flex; align-items:center; gap:12px; padding:9px 16px; border-radius:10px; margin:8px 16px 8px 0; }
+  .tb-dark { background:#1c1c1c; }
+  .tb-light { background:#f7f7f7; }
+  .fake { width:18px; height:18px; border-radius:4px; opacity:.30; }
+  .tb-dark .fake { background:#9aa3b2; }
+  .tb-light .fake { background:#5a6472; }
+</style>
+</head>
+<body>
+<h1>iconDesktop 应用图标 · 定稿</h1>
+<p class="sub">B 形状：2×2 磁贴（左上 #A0DDFF 亮片 + 天蓝渐变 #4FC7FF → #1387FF）· 8 帧 4× 超采样</p>
+
+<h2>全部帧 · 实际尺寸（深底 / 白底）</h2>
+<div class="row" id="frames"></div>
+
+<h2>托盘 / 任务栏模拟（16px 原尺寸）</h2>
+<div>
+  <div class="taskbar tb-dark"><span id="t16d"></span><span class="fake"></span><span class="fake"></span><span class="fake"></span></div>
+  <div class="taskbar tb-light"><span id="t16l"></span><span class="fake"></span><span class="fake"></span><span class="fake"></span></div>
+</div>
+
+<script>
+const SIZES = [16, 20, 24, 32, 48, 64, 96, 256];
+const SKY = { stops: ['#4FC7FF', '#1387FF'] };
+const ACCENT = '#A0DDFF';
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawIcon(ctx, S) {
+  ctx.clearRect(0, 0, S, S);
+  const g = S * 0.14;
+  const t = (S - g) / 2;
+  const r = t * 0.28;
+  const grad = ctx.createLinearGradient(0, 0, S, S);
+  grad.addColorStop(0, SKY.stops[0]);
+  grad.addColorStop(1, SKY.stops[1]);
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 2; col++) {
+      const x = col * (t + g);
+      const y = row * (t + g);
+      ctx.fillStyle = (row === 0 && col === 0) ? ACCENT : grad;
+      roundRect(ctx, x, y, t, t, r);
+      ctx.fill();
+    }
+  }
+}
+
+function render(S) {
+  const big = document.createElement('canvas');
+  big.width = S * 4;
+  big.height = S * 4;
+  drawIcon(big.getContext('2d'), S * 4);
+  const out = document.createElement('canvas');
+  out.width = S;
+  out.height = S;
+  const octx = out.getContext('2d');
+  octx.imageSmoothingEnabled = true;
+  octx.imageSmoothingQuality = 'high';
+  octx.drawImage(big, 0, 0, S, S);
+  return out;
+}
+
+function build() {
+  const frames = document.getElementById('frames');
+  for (const S of SIZES) {
+    for (const cls of ['dark', 'white']) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      const pad = document.createElement('div');
+      pad.className = 'pad ' + cls;
+      pad.appendChild(render(S));
+      const cap = document.createElement('div');
+      cap.className = 's';
+      cap.textContent = S + 'px';
+      cell.appendChild(pad);
+      cell.appendChild(cap);
+      frames.appendChild(cell);
+    }
+  }
+  for (const [id, S] of [['t16d', 16], ['t16l', 16]]) {
+    document.getElementById(id).appendChild(render(S));
+  }
+}
+
+function exportPNGs() {
+  return SIZES.map(S => ({ size: S, dataUrl: render(S).toDataURL('image/png') }));
+}
+
+// 拼一张总览 PNG（绕开浏览器截图管线的 canvas 合成问题）
+function collage() {
+  const padL = 40;
+  const gap = 34;
+  const rowTop = [120, 420];
+  const W = 1560, H = 800;
+  const c = document.createElement('canvas');
+  c.width = W;
+  c.height = H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#0b0f17';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#e6e9f0';
+  ctx.font = '600 20px "Segoe UI", sans-serif';
+  ctx.fillText('iconDesktop 图标 · 定稿（2×2 磁贴 · 亮片 #A0DDFF · 天蓝渐变 #4FC7FF → #1387FF）', padL, 50);
+  ctx.fillStyle = '#8b93a7';
+  ctx.font = '13px "Segoe UI", sans-serif';
+  ctx.fillText('上：深底（任务栏/深色主题观感） · 下：白底（资源管理器最苛刻场景）', padL, 78);
+  const xs = [];
+  let x = padL;
+  for (const S of SIZES) {
+    xs.push({ S, x });
+    x += S + gap;
+  }
+  // 行 1：直接画在深色页面上
+  for (const { S, x: cx } of xs) {
+    ctx.drawImage(render(S), cx, rowTop[0]);
+    ctx.fillStyle = '#6b7386';
+    ctx.font = '11px "Segoe UI", sans-serif';
+    ctx.fillText(S + 'px', cx, rowTop[0] + S + 18);
+  }
+  // 行 2：白底圆角垫
+  for (const { S, x: cx } of xs) {
+    ctx.fillStyle = '#ffffff';
+    roundRect(ctx, cx - 12, rowTop[1] - 12, S + 24, S + 24, 10);
+    ctx.fill();
+    ctx.drawImage(render(S), cx, rowTop[1]);
+  }
+  // 任务栏模拟条
+  const stripY = rowTop[1] + 256 + 50;
+  const strip = (y, bg, fakeColor, label) => {
+    ctx.fillStyle = bg;
+    roundRect(ctx, padL, y, 620, 48, 10);
+    ctx.fill();
+    ctx.drawImage(render(16), padL + 16, y + 16);
+    ctx.fillStyle = fakeColor;
+    for (let i = 0; i < 3; i++) {
+      roundRect(ctx, padL + 48 + i * 30, y + 15, 18, 18, 4);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#6b7386';
+    ctx.font = '12px "Segoe UI", sans-serif';
+    ctx.fillText(label, padL + 640, y + 30);
+  };
+  strip(stripY, '#1c1c1c', 'rgba(154,163,178,.35)', '深色任务栏');
+  strip(stripY + 62, '#f7f7f7', 'rgba(90,100,114,.35)', '浅色任务栏');
+  return c.toDataURL('image/png');
+}
+
+build();
+window.__exportPNGs = exportPNGs;
+window.__exportCollage = collage;
+</script>
+</body>
+</html>

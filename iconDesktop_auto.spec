@@ -10,7 +10,7 @@ a = Analysis(
     ['E:\\BOVC\\Project\\iconDesktop\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('E:\\BOVC\\Project\\iconDesktop\\icon\\iconDesktop.ico', 'icon')],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -43,6 +43,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='E:\\BOVC\\Project\\iconDesktop\\icon\\iconDesktop.ico',
     upx_exclude=[],
     runtime_tmpdir=None,
 )

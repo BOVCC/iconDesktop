@@ -22,6 +22,7 @@ from PySide6.QtGui import QContextMenuEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMenu  # noqa: E402
 
 from app import scanner  # noqa: E402
+import app.config as config_module  # noqa: E402
 from app.main_window import MainWindow  # noqa: E402
 
 FIXTURES = [("记事本", "C:/Windows/System32/notepad.exe"),
@@ -48,6 +49,13 @@ def main():
     fixture_dir = make_fixtures()
     original_scan = scanner.scan_folder
     scanner.scan_folder = lambda: original_scan(fixture_dir)
+
+    # 配置重定向到临时目录：测试全程（包括 app.quit() 触发 closeEvent 落盘）
+    # 都不会读写用户真实的 config.json
+    original_config = (config_module.CONFIG_PATH, config_module.LEGACY_CONFIG_PATH)
+    config_dir = Path(tempfile.mkdtemp(prefix="iconDesktop_cfg_"))
+    config_module.CONFIG_PATH = config_dir / "config.json"
+    config_module.LEGACY_CONFIG_PATH = config_dir / "legacy.json"
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")  # 与 main.py 保持一致
@@ -128,6 +136,7 @@ def main():
         app.exec()
     finally:
         scanner.scan_folder = original_scan
+        config_module.CONFIG_PATH, config_module.LEGACY_CONFIG_PATH = original_config
         shutil.rmtree(fixture_dir, ignore_errors=True)
     print("[7] 应用正常退出", flush=True)
 

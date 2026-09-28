@@ -7,12 +7,15 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtNetwork import QLocalServer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+import main as main_module  # noqa: E402
 import app.config as config_module  # noqa: E402
 from app import lnk_utils, scanner  # noqa: E402
 from app.config import Config  # noqa: E402
 from app.icon_grid import IconGrid  # noqa: E402
+from app.main_window import MainWindow  # noqa: E402
 
 
 def main():
@@ -93,7 +96,7 @@ def main():
         config = config_module.Config()
         assert len(config.legacy_manual_apps) == 1, "旧版手动应用未读出"
         assert config.legacy_manual_apps[0]["name"] == "旧应用"
-        config.hide("有效项")
+        config.data["hidden"] = ["有效项"]  # 旧版隐藏键：兼容读写、不再参与过滤
         config.set_order(["C:/旧路径.exe", "C:/有效项.lnk"])
         # 启动清理：文件夹里已不存在的条目应被删除
         assert config.prune_stale({"有效项"}, {"C:/有效项.lnk"}) is True
@@ -102,6 +105,60 @@ def main():
         config.save()
         assert config_module.CONFIG_PATH.exists(), "配置未写入 exe 同级目录"
         print("[OK] 配置读写、旧配置迁移与失效清理正常")
+
+    # 6. 删除图标：连「快捷方式」文件夹里的文件与配置一起清理
+    with tempfile.TemporaryDirectory() as dt:
+        dt_path = Path(dt)
+        shortcut_dir = dt_path / "快捷方式"
+        shortcut_dir.mkdir()
+        (shortcut_dir / "应用甲.exe").write_bytes(b"")
+        (shortcut_dir / "应用乙.exe").write_bytes(b"")
+        original_folder = scanner.shortcut_folder
+        original_cfg_path = config_module.CONFIG_PATH
+        scanner.shortcut_folder = lambda: shortcut_dir
+        config_module.CONFIG_PATH = dt_path / "config.json"
+        config_module.CONFIG_PATH.write_text(
+            json.dumps(
+                {
+                    "order": [str(shortcut_dir / "应用甲.exe"), str(shortcut_dir / "应用乙.exe")],
+                    "positions": {
+                        str(shortcut_dir / "应用甲.exe"): [0, 0],
+                        str(shortcut_dir / "应用乙.exe"): [1, 0],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_question = QMessageBox.question
+        QMessageBox.question = lambda *a, **k: QMessageBox.StandardButton.Yes
+        try:
+            win = MainWindow()
+            assert win.grid.count() == 2, win.grid.count()
+            win.delete_app(win.grid.apps()[0])
+            assert not (shortcut_dir / "应用甲.exe").exists(), "文件应被一并删除"
+            assert win.grid.count() == 1, "网格应少一项"
+            saved = json.loads(config_module.CONFIG_PATH.read_text(encoding="utf-8"))
+            assert saved["order"] == [str(shortcut_dir / "应用乙.exe")], saved["order"]
+            assert list(saved["positions"]) == [str(shortcut_dir / "应用乙.exe")], saved["positions"]
+            win.close()
+        finally:
+            scanner.shortcut_folder = original_folder
+            config_module.CONFIG_PATH = original_cfg_path
+            QMessageBox.question = original_question
+        print("[OK] 删除图标：文件与配置同步清理")
+
+    # 7. 单实例：第二个实例能检测到已运行的实例
+    original_key = main_module.SINGLE_INSTANCE_KEY
+    main_module.SINGLE_INSTANCE_KEY = "iconDesktop.smoke-test"
+    server = QLocalServer()
+    assert server.listen(main_module.SINGLE_INSTANCE_KEY)
+    try:
+        assert main_module.already_running(), "应检测到已监听的实例"
+    finally:
+        server.close()
+        main_module.SINGLE_INSTANCE_KEY = original_key
+    assert not main_module.already_running(), "不应误报实例存在"
+    print("[OK] 单实例检测正常")
 
     print("\n全部冒烟测试通过")
 

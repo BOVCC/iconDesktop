@@ -42,7 +42,7 @@ DARK = {
 }
 
 THEMES = {"light": LIGHT, "dark": DARK}
-DEFAULT_MODE = "light"
+DEFAULT_MODE = "dark"
 
 _mode = DEFAULT_MODE
 
