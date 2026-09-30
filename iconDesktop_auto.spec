@@ -14,13 +14,13 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['E:\\BOVC\\Project\\iconDesktop\\build\\rthook_config_location.py'],
     excludes=['tkinter', 'matplotlib', 'numpy'],
     noarchive=False,
 )
 
 # 剔除用不到的二进制（片段匹配，来自 build_config.json 的 strip_binaries）
-strip_binaries = ['opengl32sw', 'qt6quick', 'qt6qml', 'qt6pdf', 'qt6virtualkeyboard', 'qt6opengl', 'qt6network', 'qtnetwork.pyd', 'libcrypto-3-x64', 'libssl-3-x64', 'platforminputcontexts', 'qmltooling', 'qpdf', 'pythonwin', 'mfc140u', 'win32ui']
+strip_binaries = ['opengl32sw', 'qt6quick', 'qt6qml', 'qt6pdf', 'qt6virtualkeyboard', 'qt6opengl', 'libcrypto-3-x64', 'libssl-3-x64', 'platforminputcontexts', 'qmltooling', 'qpdf', 'pythonwin', 'mfc140u', 'win32ui']
 a.binaries = [b for b in a.binaries
               if not any(p in b[0].lower() for p in strip_binaries)]
 
@@ -32,7 +32,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='iconDesktop',
+    name='iconDesktop_appdata',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -14,9 +14,9 @@ def base_dir():
 def data_dir():
     """用户数据目录（config.json 与「快捷方式」文件夹所在处）。
 
-    便携版（默认）跟随 exe/脚本所在目录；安装版由打包脚本向 exe 注入
-    环境变量 ICONDESKTOP_CONFIG_LOCATION=appdata（见 build.py），数据放
-    C 盘 %APPDATA%\\iconDesktop，适合把 exe 放进只读目录（如 Program Files）。
+    便携版由打包脚本向 exe 注入环境变量 ICONDESKTOP_CONFIG_LOCATION=appdata
+    （见 build.py），数据放 C 盘 %APPDATA%\\iconDesktop 用户目录，exe 放哪里
+    （包括只读目录）都能跑；不带该变量时数据跟随 exe/脚本所在目录。
     """
     if os.environ.get("ICONDESKTOP_CONFIG_LOCATION") == "appdata":
         return Path(os.environ.get("APPDATA", str(Path.home()))) / "iconDesktop"

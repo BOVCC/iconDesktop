@@ -49,10 +49,14 @@ def main():
         assert all(a["path"].endswith((".lnk", ".exe")) for a in apps)
         print(f"[OK] 扫描到 {len(apps)} 个启动项: {sorted(names)}")
 
-        # 3. 网格填充 + 图标 + 过滤 + 顺序
+        # 3. 网格填充 + 图标 + 过滤 + 顺序 + 分页
         grid = IconGrid()
+        grid.resize(800, 500)
+        grid.show()
+        app.processEvents()
         grid.populate(apps)
         assert grid.count() == len(apps), "网格数量与扫描结果不一致"
+        assert grid.page_count() == 1, "少量应用应只有一页"
         items_with_icon = sum(
             1 for i in range(grid.count()) if not grid.item(i).icon().isNull()
         )
@@ -87,6 +91,10 @@ def main():
                     ],
                     "hidden": ["旧隐藏项"],
                     "order": ["C:/旧路径.exe"],
+                    "positions": {
+                        "C:/旧路径.exe": [2, 0],
+                        "C:/旧应用.exe": [0, 0],
+                    },
                 }
             ),
             encoding="utf-8",
@@ -96,6 +104,9 @@ def main():
         config = config_module.Config()
         assert len(config.legacy_manual_apps) == 1, "旧版手动应用未读出"
         assert config.legacy_manual_apps[0]["name"] == "旧应用"
+        # 旧坐标布局一次性迁移为顺序（按行列次序），positions 键清空
+        assert config.order == ["C:/旧应用.exe", "C:/旧路径.exe"], config.order
+        assert config.data["positions"] == {}, config.data["positions"]
         config.data["hidden"] = ["有效项"]  # 旧版隐藏键：兼容读写、不再参与过滤
         config.set_order(["C:/旧路径.exe", "C:/有效项.lnk"])
         # 启动清理：文件夹里已不存在的条目应被删除
@@ -121,10 +132,6 @@ def main():
             json.dumps(
                 {
                     "order": [str(shortcut_dir / "应用甲.exe"), str(shortcut_dir / "应用乙.exe")],
-                    "positions": {
-                        str(shortcut_dir / "应用甲.exe"): [0, 0],
-                        str(shortcut_dir / "应用乙.exe"): [1, 0],
-                    },
                 }
             ),
             encoding="utf-8",
@@ -139,7 +146,7 @@ def main():
             assert win.grid.count() == 1, "网格应少一项"
             saved = json.loads(config_module.CONFIG_PATH.read_text(encoding="utf-8"))
             assert saved["order"] == [str(shortcut_dir / "应用乙.exe")], saved["order"]
-            assert list(saved["positions"]) == [str(shortcut_dir / "应用乙.exe")], saved["positions"]
+            assert saved.get("positions", {}) == {}, saved.get("positions")
             win.close()
         finally:
             scanner.shortcut_folder = original_folder
@@ -148,6 +155,7 @@ def main():
         print("[OK] 删除图标：文件与配置同步清理")
 
     # 7. 单实例：第二个实例能检测到已运行的实例
+    # 全程使用测试专属 key，避免机器上正在运行的真实 iconDesktop 干扰断言
     original_key = main_module.SINGLE_INSTANCE_KEY
     main_module.SINGLE_INSTANCE_KEY = "iconDesktop.smoke-test"
     server = QLocalServer()
@@ -156,8 +164,8 @@ def main():
         assert main_module.already_running(), "应检测到已监听的实例"
     finally:
         server.close()
-        main_module.SINGLE_INSTANCE_KEY = original_key
     assert not main_module.already_running(), "不应误报实例存在"
+    main_module.SINGLE_INSTANCE_KEY = original_key
     print("[OK] 单实例检测正常")
 
     print("\n全部冒烟测试通过")

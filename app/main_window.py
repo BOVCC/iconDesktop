@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from app import lnk_utils, scanner, title_bar
 from app.config import Config
-from app.icon_grid import IconGrid
+from app.icon_grid import IconGrid, PageBar
 from app.theme import apply_theme, apply_titlebar_theme
 from app.theme import colors as theme_colors
 
@@ -209,14 +209,21 @@ class MainWindow(QMainWindow):
         top.addWidget(refresh_btn)
         top.addWidget(self._build_settings_button())
 
-        # 图标网格
+        # 图标网格 + 右侧翻页栏（仅一页时翻页栏自动隐藏）
         self.grid = IconGrid()
         self.grid.set_launch_mode(self.config.settings["launch_on"])
+        self.grid.set_scale(self.config.settings.get("icon_scale", 1.0))
         self.grid.app_launched.connect(self._on_app_launched)
         self.grid.launch_failed.connect(self._on_launch_failed)
         self.grid.delete_requested.connect(self.delete_app)
         self.grid.layout_changed.connect(self._persist_layout)
+        self.grid.page_changed.connect(self._on_page_changed)
+        self.grid.scale_changed.connect(self._on_scale_changed)
         self.search_box.textChanged.connect(self.grid.filter)
+
+        self.page_bar = PageBar()
+        self.grid.page_changed.connect(self.page_bar.set_pages)
+        self.page_bar.page_requested.connect(self.grid.goto_page)
 
         central = QWidget()
         outer = QVBoxLayout(central)
@@ -225,9 +232,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.title_bar)
         outer.addWidget(topbar)
         body = QWidget()
-        layout = QVBoxLayout(body)
+        layout = QHBoxLayout(body)
         layout.setContentsMargins(12, 10, 12, 8)
+        layout.setSpacing(8)
         layout.addWidget(self.grid, 1)
+        layout.addWidget(self.page_bar)
         outer.addWidget(body, 1)
         self.setCentralWidget(central)
 
@@ -393,18 +402,25 @@ class MainWindow(QMainWindow):
 
     # ---- 数据装载 ----
     def _reload_apps(self):
-        self.grid.populate(scanner.scan_folder(), self.config.order, self.config.positions)
-        if self.grid.count():
-            self.statusBar().showMessage(f"共 {self.grid.count()} 个应用")
-        else:
+        self.grid.populate(scanner.scan_folder(), self.config.order)
+        if not self.grid.count():
             self.statusBar().showMessage(
                 "快捷方式文件夹为空：请将 .lnk/.exe 放入用户数据目录的「快捷方式」文件夹"
             )
 
     def _persist_layout(self):
-        """保存图标顺序与格子坐标；拖拽落位后立即调用，防托盘常驻时丢布局。"""
-        self.config.set_order([a["path"] for a in self.grid.apps()])
-        self.config.set_positions(self.grid.positions())
+        """保存图标顺序；拖拽落位后立即调用，防托盘常驻时丢布局。"""
+        self.config.set_order(self.grid.order())
+        self.config.save()
+
+    def _on_page_changed(self, page, total):
+        if self.grid.count():
+            self.statusBar().showMessage(
+                f"第 {page + 1}/{total} 页 · 共 {self.grid.count()} 个应用"
+            )
+
+    def _on_scale_changed(self, scale):
+        self.config.settings["icon_scale"] = round(float(scale), 4)
         self.config.save()
 
     def _restore_window(self):

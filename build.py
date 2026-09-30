@@ -3,9 +3,9 @@
 """iconDesktop 打包脚本：读取 build_config.json，生成 spec 后调用 PyInstaller。
 
 日常用法（打包参数都在 build_config.json 里改，本脚本一般不带参数运行）：
-    python build.py                 # 按 build_config.json 打包
-    python build.py --mode onedir   # 本次临时改用 onedir 模式（不改动 JSON）
-    python build.py --config-location appdata   # 本次打「安装版」：配置放 C 盘
+    python build.py                 # 按 build_config.json 打包（数据跟随 exe）
+    python build.py --mode onedir   # 本次临时改用 onedir 文件夹形态（不改动 JSON）
+    python build.py --config-location appdata   # 便携版：数据放 C 盘用户目录 %APPDATA%
     python build.py --clean         # 清空 PyInstaller 缓存，全量重建
     python build.py --print-spec    # 只打印将生成的 spec 内容，不打包
 """
@@ -114,8 +114,9 @@ def load_config(path: Path, overrides: dict) -> dict:
     cfg["_dist"] = (path.parent / cfg["dist_path"]).resolve()
     cfg["_work"] = (path.parent / cfg["work_path"]).resolve()
 
-    # 安装版（appdata）：产物加后缀与便携版区分，并通过运行时钩子注入
-    # 数据目录环境变量（见 app/scanner.py 的 data_dir）
+    # 便携版（appdata）：数据放 C 盘用户目录，产物名加 _appdata 后缀与数据
+    # 跟随 exe 的版本区分，并通过运行时钩子注入数据目录环境变量
+    # （见 app/scanner.py 的 data_dir）
     if cfg["config_location"] == "appdata":
         cfg["_product_name"] = f"{cfg['name']}_appdata"
         cfg["_rthook"] = str(cfg["_work"] / "rthook_config_location.py")
@@ -300,7 +301,7 @@ def main() -> None:
     print(f"[1/2] 开始打包（mode={cfg['mode']}，config={cfg['config_location']}{extra}）...")
     print(f"      {' '.join(cmd)}")
     if cfg["config_location"] == "appdata":
-        print("      安装版：配置与「快捷方式」文件夹将位于 C 盘 %APPDATA%\\iconDesktop")
+        print("      便携版：配置与「快捷方式」文件夹将位于 C 盘 %APPDATA%\\iconDesktop")
 
     start = time.perf_counter()
     try:

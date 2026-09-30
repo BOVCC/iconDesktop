@@ -1,6 +1,6 @@
-"""JSON 配置读写，存放在用户数据目录下（便携版为 exe/脚本同级目录，
-安装版由打包脚本注入环境变量后放 C 盘 %APPDATA%\\iconDesktop，见
-app/scanner.py 的 data_dir()）。
+"""JSON 配置读写，存放在用户数据目录下（便携版由打包脚本注入环境变量后
+放 C 盘 %APPDATA%\\iconDesktop 用户目录；数据跟随 exe 的版本存 exe/脚本
+同级目录，见 app/scanner.py 的 data_dir()）。
 
 旧版本把配置放在 %APPDATA%\\iconDesktop\\config.json，首次启动时自动改读
 旧文件完成迁移；旧文件中的 manual_apps（手动添加应用）由主窗口迁移成
@@ -21,12 +21,13 @@ LEGACY_CONFIG_PATH = (
 
 DEFAULTS = {
     "hidden": [],     # 被隐藏的快捷方式文件夹条目名称
-    "order": [],      # 图标路径顺序（无坐标条目的摆放优先级）
-    "positions": {},  # 图标固定格子坐标 {路径: [列, 行]}，允许留空格
+    "order": [],      # 图标显示顺序（分页布局按此顺序紧凑排布）
+    "positions": {},  # 旧版坐标遗留键：加载时迁移进 order，此后不再写入
     "settings": {
         "launch_on": "double",            # click | double
         "minimize_after_launch": True,
         "theme": "dark",                  # light | dark
+        "icon_scale": 1.0,                # 图标缩放级别，格子宽高比固定 2:3
     },
 }
 
@@ -65,6 +66,39 @@ class Config:
             self.data["window"] = stored["window"]
         if isinstance(stored.get("settings"), dict):
             self.data["settings"] = {**DEFAULTS["settings"], **stored["settings"]}
+        if self._migrate_positions():
+            # 旧坐标布局一次性迁移为顺序，立即落盘避免下次重复迁移
+            try:
+                self.save()
+            except OSError:
+                pass
+
+    def _migrate_positions(self):
+        """旧版 positions（{路径: [列, 行]}）按行列次序合并进 order。
+
+        分页布局只按顺序紧凑排布，不再保存格子坐标；返回是否发生迁移。
+        """
+        positions = self.data.get("positions")
+        if not isinstance(positions, dict) or not positions:
+            return False
+
+        def cell_key(item):
+            cell = item[1]
+            try:
+                return (int(cell[1]), int(cell[0]))  # 行优先
+            except (TypeError, ValueError, IndexError, KeyError):
+                return (1 << 30, 1 << 30)
+
+        merged = []
+        for path, _cell in sorted(positions.items(), key=cell_key):
+            if path not in merged:
+                merged.append(path)
+        for path in self.data["order"]:
+            if path not in merged:
+                merged.append(path)
+        self.data["order"] = merged
+        self.data["positions"] = {}
+        return True
 
     def save(self):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -94,20 +128,6 @@ class Config:
 
     def set_order(self, paths):
         self.data["order"] = list(paths)
-
-    @property
-    def positions(self):
-        return dict(self.data["positions"])
-
-    def set_positions(self, positions):
-        """positions: {路径: [列, 行]}，无效条目忽略。"""
-        cleaned = {}
-        for path, cell in (positions or {}).items():
-            try:
-                cleaned[str(path)] = [int(cell[0]), int(cell[1])]
-            except (TypeError, ValueError, IndexError, KeyError):
-                continue
-        self.data["positions"] = cleaned
 
     # ---- 其他设置 ----
     @property
