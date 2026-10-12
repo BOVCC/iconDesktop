@@ -3,6 +3,9 @@ import os
 import sys
 from pathlib import Path
 
+# 可启动的条目类型（扫描与文件拖放共用）
+ENTRY_SUFFIXES = (".lnk", ".exe")
+
 
 def base_dir():
     """程序所在目录：打包后为 exe 所在目录，源码运行为项目根目录。"""
@@ -44,7 +47,7 @@ def scan_folder(directory=None):
         return []
     entries = {}
     for path in sorted(folder.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in (".lnk", ".exe"):
+        if not path.is_file() or path.suffix.lower() not in ENTRY_SUFFIXES:
             continue
         name = path.stem.strip()
         if not name:
@@ -59,3 +62,22 @@ def scan_folder(directory=None):
             },
         )
     return sorted(entries.values(), key=lambda e: e["name"].lower())
+
+
+def file_paths_from_mime(mime):
+    """从拖放的 MIME 数据里取出可添加的 exe/lnk 本地路径（去重、保持顺序）。"""
+    if mime is None or not mime.hasUrls():
+        return []
+    paths, seen = [], set()
+    for url in mime.urls():
+        if not url.isLocalFile():
+            continue
+        path = url.toLocalFile()
+        if not path or not path.lower().endswith(ENTRY_SUFFIXES):
+            continue
+        key = os.path.normcase(os.path.normpath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(os.path.normpath(path))
+    return paths

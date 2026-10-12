@@ -9,11 +9,18 @@
 - 缩放：Ctrl+滚轮；翻页：滚轮、A/D、←/→、PgUp/PgDn、Home/End，以及右侧
   翻页栏（PageBar，点击跳转/翻页并指示当前页）。
 
-拖拽整理为自实现：按下超过拖拽阈值后启动 QDrag，不透明的「图标+名称」
-像素图由系统带着跟随光标（像素级丝滑，不吸附格子）；落点阴影（半透明
-预览 + 描边）吸附到插入点格子，作为落位指引。落点分区按光标在目标
-格子内的横向位置分三个区（与手机桌面一致，任意位置的图标都能触发，
-不局限于屏幕两侧）：
+拖拽整理为自实现（不走 QDrag）：按下超过拖拽阈值后启动自管拖拽，不透明的
+「图标 + 名称」像素图由顶层浮层跟随光标（像素级丝滑，不吸附格子）；落点阴影
+（半透明预览 + 描边）吸附到插入点格子，作为落位指引。
+
+为什么不用 QDrag：Windows 上 QDrag 走 OLE DoDragDrop 模态循环（Qt 源码
+qwindowsdrag.cpp），循环期间只有拖放回调与定时器能跑，滚轮事件要到拖拽结束
+才派发——而「把图标拖到其他页」正需要在拖动中滚轮翻页。自管拖拽期间滚轮、
+鼠标移动都是普通 Qt 事件，跨页整理因此可用；顺带整套交互能在离屏测试里
+完整模拟（无需替换任何方法）。
+
+落点分区按光标在目标格子内的横向位置分三个区（与手机桌面一致，任意位置的
+图标都能触发，不局限于屏幕两侧）：
 - 中间 50% 宽度 → 与目标图标互换；
 - 左 1/4 边缘 → 插入到目标图标之前：落点到原位之间的图标向原位方向
   顺移一格补位（原位在右侧时整体右移、在左侧时整体左移）；
@@ -24,11 +31,13 @@
   不会把图标挤出本页。
 """
 import math
+import os
+from collections import deque
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QFileInfo,
-    QMimeData,
     QPoint,
     QPointF,
     QRect,
@@ -39,7 +48,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF, QDrag
+from PySide6.QtGui import QCursor, QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -52,10 +61,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app import launcher, lnk_utils
+from app import launcher, lnk_utils, scanner, win_icons
 from app.theme import colors as theme_colors
 
 DATA_ROLE = Qt.UserRole
+BADGE_ROLE = Qt.UserRole + 1     # 选择模式下的角标（如「已添加」）
 
 DRAG_OPACITY = 0.45     # 落点阴影透明度
 
@@ -70,6 +80,52 @@ ZOOM_STEP = 1.12        # Ctrl+滚轮每格的缩放系数
 ICON_RENDER_SIZE = 256  # 图标归一化边长（覆盖最大图标尺寸 120px 及高分屏请求）
 
 
+class DragImage(QWidget):
+    """拖动时跟随光标的浮层：无边框、透明背景、不吃鼠标事件、不抢焦点。
+
+    为什么不用 QDrag 自带的系统拖影：Windows 上 QDrag 走 OLE DoDragDrop 模态
+    循环（见 Qt 源码 qwindowsdrag.cpp），循环期间只有拖放回调与定时器能跑，
+    滚轮事件要等拖拽结束才派发——而「拖动图标到其他页」恰恰需要在拖动中滚轮
+    翻页／悬停翻页。自管拖拽不进模态循环，滚轮与鼠标移动都是普通 Qt 事件，
+    顺带也让这套交互可以在离屏测试里完整模拟。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowTransparentForInput
+            | Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self._pixmap = QPixmap()
+        self._hotspot = QPoint()
+
+    def begin(self, pixmap, hotspot):
+        """设置拖影内容与热区（热区对应用户抓取的那一点）。"""
+        self._pixmap = pixmap
+        self._hotspot = hotspot
+        dpr = pixmap.devicePixelRatio() or 1.0
+        self.resize(
+            max(1, round(pixmap.width() / dpr)), max(1, round(pixmap.height() / dpr))
+        )
+        self.show()
+
+    def follow(self, global_pos):
+        """让热区始终落在光标处。"""
+        self.move(global_pos - self._hotspot)
+
+    def paintEvent(self, event):
+        if self._pixmap.isNull():
+            return
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._pixmap)
+        painter.end()
+
+
 class IconGrid(QListWidget):
     app_launched = Signal(dict)
     launch_failed = Signal(str)
@@ -77,12 +133,18 @@ class IconGrid(QListWidget):
     layout_changed = Signal()       # 拖拽落位后发出，供主窗口立即保存顺序
     page_changed = Signal(int, int)  # (当前页, 总页数)，均为 0 基
     scale_changed = Signal(float)    # 缩放级别变化（供配置保存）
+    selection_changed = Signal()     # 选择模式下选中项变化（供计数显示）
+    files_dropped = Signal(list)     # 外部拖入的 exe/lnk 路径（供自动添加）
+    file_drag_hover = Signal(bool)   # 外部文件悬停在网格上（供提示/状态栏）
+
+    LAZY_BATCH = 6          # 懒加载图标每批提取张数（约 3ms 一张，一批 ~20ms）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._provider = QFileIconProvider()
-        self._icons = {}
+        self._icons = {}            # path -> (自身时间戳, 图标来源, 来源时间戳, QIcon)
         self._launch_mode = "click"
+        self._select_mode = False   # 选择模式：多选、不启动/不拖拽（全部快捷方式窗口）
         self._order = []            # 显示顺序（路径），紧凑无空洞
         self._items = {}            # path -> QListWidgetItem
         self._scale = 1.0
@@ -104,8 +166,8 @@ class IconGrid(QListWidget):
         self.setResizeMode(QListWidget.Fixed)
         self.setMovement(QListWidget.Free)
         self.setDragDropMode(QListWidget.NoDragDrop)
-        # 自实现拖拽：QDrag 由 _begin_drag 主动发起，拖拽事件由本类
-        # dragEnter/dragMove/drop 处理；保持 NoDragDrop 关闭 Qt 内置搬移
+        # 自实现拖拽：_begin_drag 启动自管拖拽（不走 QDrag），外部文件拖放由
+        # 本类 dragEnter/dragMove/drop 处理；NoDragDrop 关闭 Qt 内置搬移
         self.setAcceptDrops(True)
         self.viewport().setAcceptDrops(True)
         self.setWordWrap(True)
@@ -117,6 +179,7 @@ class IconGrid(QListWidget):
         self.customContextMenuRequested.connect(self._show_menu)
         self.itemClicked.connect(self._on_clicked)
         self.itemActivated.connect(self._on_activated)
+        self.itemSelectionChanged.connect(self.selection_changed)
 
         # 自实现拖拽状态
         self._press_item = None
@@ -124,6 +187,8 @@ class IconGrid(QListWidget):
         self._drag_active = False
         self._drag_item = None
         self._drag_path = None
+        self._drag_image = DragImage(self)   # 跟随光标的拖影浮层
+        self._page_bar = None           # 由主窗口/对话框注入，拖动中驱动悬停翻页
         self._origin_cell = (-1, -1)    # 拖动条目在当前页的格子
         self._target_cell = (-1, -1)    # 当前吸附到的格子
         self._drop_zone = "center"      # 光标在格子内的分区 left/center/right
@@ -138,15 +203,29 @@ class IconGrid(QListWidget):
         self._drag_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._drag_anim.valueChanged.connect(self._anim_tick)
 
+        # 懒加载图标：新加入的图标分批提取，避免一次性算完把窗口卡住
+        self._lazy_queue = deque()
+        self._lazy_timer = QTimer(self)
+        self._lazy_timer.setInterval(0)
+        self._lazy_timer.timeout.connect(self._load_pending_icons)
+
+        # 选择模式下的区间选择起点（Shift 点击）
+        self._last_toggled = None
+        self._file_hover = False        # 外部文件拖拽悬停中（画提示）
+
     # ---- 数据 ----
-    def populate(self, apps, order=None):
+    def populate(self, apps, order=None, lazy_icons=False):
         """apps: [{name, path, args, workdir}]；order: 期望显示顺序（路径列表）。
 
         显示顺序 = order 中仍存在的路径，新出现的应用按名称次序追加到末尾
         （最后一页的空位），因此新应用永远自动排列、不会压在旧图标下面。
+        lazy_icons=True 时先只放通用图标，再分批补齐（「全部快捷方式」窗口
+        有几百项，一次性提取会把窗口卡住几秒）。
         """
         self.clear()
         self._items = {}
+        self._lazy_queue.clear()
+        self._last_toggled = None
         app_by_path = {}
         for app in apps:
             app_by_path[str(app["path"])] = app
@@ -163,15 +242,101 @@ class IconGrid(QListWidget):
         )
         self._order = kept + [a["path"] for a in new_apps]
         for app in app_by_path.values():
-            item = QListWidgetItem(self._icon_for(app["path"]), app["name"])
+            if lazy_icons:
+                item = QListWidgetItem(self._placeholder_icon(), app["name"])
+                self._lazy_queue.append(app["path"])
+            else:
+                item = QListWidgetItem(self._icon_for(app["path"]), app["name"])
             item.setData(DATA_ROLE, app)
             tip = app["path"]
             if app.get("args"):
                 tip += f" {app['args']}"
+            if app.get("tip"):
+                tip = f"{app['tip']}\n{tip}"
             item.setToolTip(tip)
             self._items[app["path"]] = item
             self.addItem(item)
         self._relayout()
+        if self._lazy_queue:
+            self._lazy_timer.start()
+        else:
+            self._lazy_timer.stop()
+
+    def _placeholder_icon(self):
+        """懒加载期间先显示的通用文件图标。"""
+        icon = self._provider.icon(QFileIconProvider.File)
+        return icon if not icon.isNull() else QIcon()
+
+    def _load_pending_icons(self):
+        """分批提取懒加载图标：一批几张，做完让出事件循环，界面保持响应。"""
+        processed = 0
+        while self._lazy_queue and processed < self.LAZY_BATCH:
+            path = self._lazy_queue.popleft()
+            processed += 1
+            item = self._items.get(path)
+            if item is None:
+                continue
+            try:
+                item.setIcon(self._icon_for(path))
+            except RuntimeError:  # 条目已随 populate 清空销毁
+                continue
+        if not self._lazy_queue:
+            self._lazy_timer.stop()
+        self.viewport().update()
+
+    def pending_icons(self):
+        """还有多少张图标待懒加载（供测试与进度显示）。"""
+        return len(self._lazy_queue)
+
+    def set_select_mode(self, enabled):
+        """选择模式：多选、单击即切换选中，不启动应用、不拖拽、不弹右键菜单、不框选。"""
+        self._select_mode = bool(enabled)
+        if self._select_mode:
+            self.setSelectionMode(QListWidget.ExtendedSelection)
+            # 关掉橡皮筋框选（否则按住左键在空白处拖动会框选一片，多选窗口
+            # 只要「单击切换选中 / Shift 连选」）
+            self.setSelectionRectVisible(False)
+            self.setContextMenuPolicy(Qt.NoContextMenu)
+            self.setCursor(Qt.PointingHandCursor)
+        else:
+            self.setSelectionMode(QListWidget.SingleSelection)
+            self.setSelectionRectVisible(True)
+            self.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.unsetCursor()
+
+    def selected_paths(self):
+        """当前选中的路径集合。"""
+        result = []
+        for item in self.selectedItems():
+            try:
+                result.append(item.data(DATA_ROLE)["path"])
+            except (RuntimeError, TypeError, KeyError):
+                continue
+        return result
+
+    def selected_apps(self):
+        """当前选中的应用列表（按显示顺序）。"""
+        chosen = set(self.selected_paths())
+        return [a for a in self.apps() if a["path"] in chosen]
+
+    def select_all(self):
+        for i in range(self.count()):
+            self.item(i).setSelected(True)
+        self.selection_changed.emit()
+
+    def clear_selection(self):
+        self.clearSelection()
+        self.selection_changed.emit()
+
+    def set_badge(self, path, active=True):
+        """给条目打角标（如「已添加」）并淡化名称；提示文字由 populate 的 tip 提供。"""
+        item = self._items.get(path)
+        if item is None:
+            return
+        item.setData(BADGE_ROLE, bool(active))
+        if active:
+            item.setForeground(QColor(theme_colors()["placeholder"]))
+        self.viewport().update()
 
     def order(self):
         """当前显示顺序（路径列表，供配置保存）。"""
@@ -393,9 +558,81 @@ class IconGrid(QListWidget):
 
     # ---- 图标 ----
     def _icon_for(self, path):
-        if path not in self._icons:
-            self._icons[path] = self._normalized_icon(self._extract_icon(path))
-        return self._icons[path]
+        """取图标：来源文件（含 .lnk 的目标）没变就复用缓存，变了才重新提取。
+
+        缓存里记了时间戳，应用更新覆盖了 exe 后时间戳变化 → 自动重新提取；
+        提取走 win_icons 直读文件资源，绕开外壳的进程内图标缓存，因此点
+        「刷新」就能看到新图标，不用重启程序。
+        """
+        entry = self._icons.get(path)
+        if entry is not None:
+            own_stamp, source, source_stamp, icon = entry
+            if (self._file_stamp(path) == own_stamp
+                    and self._file_stamp(source) == source_stamp):
+                return icon
+        source, index = self._icon_origin(path)
+        icon = self._normalized_icon(self._extract_icon(path, source, index))
+        self._icons[path] = (
+            self._file_stamp(path), source, self._file_stamp(source), icon,
+        )
+        return icon
+
+    def reload_icons(self):
+        """清空图标缓存并就地重取：刷新时强制重新提取。
+
+        外壳在进程内缓存文件图标（应用更新后连新进程外的通知都刷不掉它），
+        所以刷新不能只重新扫描文件夹，还要丢掉图标缓存重新提取。
+        """
+        self._icons.clear()
+        self._lazy_queue.clear()
+        self._lazy_timer.stop()
+        for path, item in list(self._items.items()):
+            try:
+                item.setIcon(self._icon_for(path))
+            except RuntimeError:  # 条目已随 populate 清空销毁
+                continue
+        self.viewport().update()
+
+    def forget_icon(self, path):
+        """丢掉某个路径的图标缓存（条目被删除时调用，避免残留）。"""
+        self._icons.pop(path, None)
+
+    @staticmethod
+    def _file_stamp(path):
+        """文件 (mtime_ns, size)；取不到返回 None。"""
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _icon_origin(self, path):
+        """图标的来源 (文件, 索引)：.lnk 用目标或自定义图标，其余用自身。"""
+        path = str(path)
+        if path.lower().endswith(".lnk"):
+            source, index = lnk_utils.icon_source(path)
+            if source:
+                return source, index
+        return path, 0
+
+    def _extract_icon(self, path, source=None, index=0):
+        """提取图标：优先直读文件里的图标资源（刷新即时生效），失败回退外壳。
+
+        回退只覆盖非 PE 文件（.bat/.url/目录等）与没有图标资源的文件，
+        这类条目少见，外壳缓存的陈旧风险可以接受。
+        """
+        if source is None:
+            source, index = self._icon_origin(path)
+        image = win_icons.extract_icon_image(source, index, ICON_RENDER_SIZE)
+        if image is not None and not image.isNull():
+            return QIcon(QPixmap.fromImage(image))
+        icon = self._provider.icon(QFileInfo(source))
+        if not icon.isNull():
+            return icon
+        icon = self._provider.icon(QFileInfo(str(path)))
+        if icon.isNull():
+            icon = self._provider.icon(QFileIconProvider.File)
+        return icon
 
     def _normalized_icon(self, icon):
         """把图标重包成统一边长的像素图 QIcon。
@@ -455,27 +692,17 @@ class IconGrid(QListWidget):
             return None
         return (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 
-    def _extract_icon(self, path):
-        path = str(path)
-        if path.lower().endswith(".lnk"):
-            # 从 lnk 指向的目标提取图标，避免 QFileIconProvider 自带的快捷方式箭头
-            source = lnk_utils.icon_source(path)
-            if source:
-                icon = self._provider.icon(QFileInfo(source))
-                if not icon.isNull():
-                    return icon
-        icon = self._provider.icon(QFileInfo(path))
-        if icon.isNull():
-            icon = self._provider.icon(QFileIconProvider.File)
-        return icon
-
     # ---- 交互 ----
     def _on_clicked(self, item):
+        if self._select_mode:
+            return          # 选择模式下由 mouseReleaseEvent 处理选中切换
         if self._launch_mode == "click":
             self._launch(item)
 
     def _on_activated(self, item):
         # Enter 键或双击触发；单击模式下启动已由 _on_clicked 处理
+        if self._select_mode:
+            return
         if self._launch_mode != "click":
             self._launch(item)
 
@@ -489,6 +716,8 @@ class IconGrid(QListWidget):
         self.app_launched.emit(app)
 
     def _show_menu(self, pos):
+        if self._select_mode:
+            return
         item = self.itemAt(pos)
         if item is None:
             return
@@ -504,6 +733,16 @@ class IconGrid(QListWidget):
 
     # ---- 鼠标与键盘交互 ----
     def mousePressEvent(self, event):
+        if self._select_mode:
+            # 选择模式自己管选中（单击切换），不让 QListWidget 的默认
+            # 单击行为清掉其他已选中的项
+            self._press_item = (
+                self.itemAt(event.position().toPoint())
+                if event.button() == Qt.LeftButton else None
+            )
+            self._press_pos = event.position().toPoint()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             self._press_item = self.itemAt(event.position().toPoint())
             self._press_pos = event.position().toPoint()
@@ -516,28 +755,66 @@ class IconGrid(QListWidget):
             self._update_drag(event.position().toPoint())
             event.accept()
             return
+        if self._select_mode:
+            # 选择模式：左键按下时不走 QAbstractItemView 的默认处理，否则在空白
+            # 处拖动会拉起橡皮筋框选（这个窗口只要「单击切换选中」）。悬停高亮
+            # 走 viewport 的 HoverMove，不受影响
+            if event.buttons() & Qt.LeftButton:
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+            return
         if (
-            self._press_item is not None
+            not self._select_mode                       # 选择模式不拖拽整理
+            and self._press_item is not None
             and event.buttons() & Qt.LeftButton
             and (event.position().toPoint() - self._press_pos).manhattanLength()
             >= QApplication.startDragDistance()
         ):
-            if self._begin_drag():  # QDrag 循环阻塞到松手/取消
-                if self._drag_active:
-                    # 同步模拟拖拽（离屏测试）时 exec 被替换为空转，拖拽仍在
-                    # 进行：用本次移动初始化落点。真实运行到这里拖拽已结束
-                    self._update_drag(event.position().toPoint())
+            if self._begin_drag():
+                self._update_drag(event.position().toPoint())
                 event.accept()
                 return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._select_mode:
+            if (event.button() == Qt.LeftButton
+                    and self.itemAt(event.position().toPoint()) is self._press_item
+                    and self._press_item is not None):
+                self._toggle_item(self._press_item, event.modifiers())
+            self._press_item = None
+            event.accept()
+            return
         if self._drag_active:
             self._finish_drag(event.position().toPoint())
             event.accept()
             return
         self._press_item = None
         super().mouseReleaseEvent(event)
+
+    def _toggle_item(self, item, modifiers):
+        """选择模式：单击切换该项；Shift+单击选中上次点击项到本项的区间。"""
+        try:
+            path = item.data(DATA_ROLE)["path"]
+        except (RuntimeError, TypeError, KeyError):
+            return
+        start = self._last_toggled
+        if modifiers & Qt.ShiftModifier and start is not None and start != path:
+            visible = self._visible_order()
+            try:
+                lo, hi = sorted((visible.index(self._order.index(start)),
+                                 visible.index(self._order.index(path))))
+            except ValueError:
+                lo = hi = -1
+            if lo >= 0:
+                for order_idx in visible[lo:hi + 1]:
+                    self._items[self._order[order_idx]].setSelected(True)
+                self.selection_changed.emit()
+            return
+        item.setSelected(not item.isSelected())
+        self._last_toggled = path
+        self.selection_changed.emit()
 
     def keyPressEvent(self, event):
         if self._drag_active and event.key() == Qt.Key_Escape:
@@ -546,6 +823,10 @@ class IconGrid(QListWidget):
             event.accept()
             return
         key = event.key()
+        if self._select_mode and key == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
+            self.select_all()          # Ctrl+A 全选（无修饰的 A 仍是翻页）
+            event.accept()
+            return
         mods = event.modifiers() & (
             Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier
         )
@@ -597,37 +878,91 @@ class IconGrid(QListWidget):
     def dragEnterEvent(self, event):
         if self._drag_active and event.source() is self:
             event.acceptProposedAction()
-        else:
-            event.ignore()
+            return
+        if self._accept_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
 
     def dragMoveEvent(self, event):
-        # QDrag 循环期间光标移动走这里（普通 mouseMoveEvent 不再收到）
+        # 只处理外部文件拖放（图片标出提示）；图标拖拽是自管的，走 mouseMoveEvent
         if self._drag_active and event.source() is self:
-            self._update_drag(event.position().toPoint())
-            event.acceptProposedAction()
-        else:
             event.ignore()
+            return
+        if self._accept_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
 
     def dragLeaveEvent(self, event):
         # 光标离开视口（如移到翻页栏/标题栏）：预览冻结，回来自动刷新
+        if self._file_hover:
+            self._set_file_hover(False)
         super().dragLeaveEvent(event)
 
     def dropEvent(self, event):
         if self._drag_active and event.source() is self:
             self._finish_drag(event.position().toPoint())
             event.acceptProposedAction()
-        else:
-            event.ignore()
+            return
+        paths = scanner.file_paths_from_mime(event.mimeData())
+        if paths:
+            self._set_file_hover(False)
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    # ---- 外部文件拖入 ----
+    def _accept_files(self, mime):
+        """是否为可添加的 exe/lnk 拖放；是则亮起拖放提示。"""
+        paths = scanner.file_paths_from_mime(mime)
+        if not paths:
+            return False
+        self._set_file_hover(True)
+        return True
+
+    def _set_file_hover(self, active):
+        if active == self._file_hover:
+            return
+        self._file_hover = active
+        self.file_drag_hover.emit(active)
+        self.viewport().update()
+
+    # ---- 拖拽中的滚轮翻页 ----
+    def eventFilter(self, obj, event):
+        """拖动中普通 wheelEvent 收不到（鼠标事件被视口独占），这里从应用级过滤器接。
+
+        拖动图标时滚轮翻页（跨页整理的前提），与不拖动时的滚轮翻页一致。
+        """
+        if self._drag_active and event.type() == QEvent.Type.Wheel:
+            delta = event.angleDelta().y() or event.angleDelta().x()
+            if delta:
+                if delta < 0:
+                    self.next_page()
+                else:
+                    self.prev_page()
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+    def set_page_bar(self, bar):
+        """注入右侧翻页栏：拖动中按光标位置驱动它的悬停翻页。
+
+        拖动时鼠标事件被网格独占，翻页栏自己收不到鼠标移动，所以由网格代转。
+        """
+        self._page_bar = bar
 
     def _begin_drag(self):
-        """启动拖拽：不透明像素图随 QDrag 跟光标；返回是否确实启动。
+        """启动拖拽：不透明像素图由浮层跟随光标；返回是否确实启动。
 
-        QDrag.exec 阻塞到松手或取消：窗口内松手经 dropEvent → _finish_drag
-        落位；Esc/丢到窗口外由 _exec_drag 收尾恢复原布局。
+        自管拖拽（不走 QDrag/OLE 模态循环），因此拖动期间滚轮、鼠标移动、
+        Esc 都是普通 Qt 事件——「拖到别的页」正是靠拖动中的滚轮/悬停翻页。
+        松手经 mouseReleaseEvent → _finish_drag 落位；Esc 或丢到窗口外取消。
         """
         item = self._press_item
         self._press_item = None
-        if item is None:
+        if item is None or self._select_mode:
             return False
         try:
             path = item.data(DATA_ROLE)["path"]
@@ -653,20 +988,13 @@ class IconGrid(QListWidget):
             self._drag_path = None
             return False
         self.viewport().setCursor(Qt.ClosedHandCursor)
-
-        drag = QDrag(self)
-        mime = QMimeData()
-        mime.setText(path)
-        drag.setMimeData(mime)
-        drag.setPixmap(pixmap)
-        drag.setHotSpot(hotspot)
-        # 隐藏拖拽自带的箭头/移动角标：拖动中只显示被抓着的图标像素图
-        # （热区仍在原抓取点，手感像直接捏着图标）；移到不可落区时系统
-        # 的「禁止」光标仍保留作提示
-        blank_cursor = QPixmap(16, 16)
-        blank_cursor.fill(Qt.transparent)
-        drag.setDragCursor(blank_cursor, Qt.MoveAction)
-        self._exec_drag(drag)
+        # 拖影浮层跟着光标走（不进 OLE 模态循环，滚轮/鼠标事件照常）
+        self._drag_image.begin(pixmap, hotspot)
+        self._drag_image.follow(QCursor.pos())
+        # 拖动期间由本类的 eventFilter 接管滚轮（见 eventFilter）
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
         return True
 
     def _drag_pixmap(self, item):
@@ -698,14 +1026,6 @@ class IconGrid(QListWidget):
         fallback = item.icon().pixmap(self.iconSize())
         return fallback, QPoint(fallback.width() // 2, fallback.height() // 2)
 
-    def _exec_drag(self, drag):
-        """QDrag 拖拽循环，阻塞到松手/取消；离屏测试以同步事件模拟时替换本方法。"""
-        drag.exec(Qt.MoveAction)
-        if self._drag_active:
-            # exec 返回但仍在拖拽态 = 没有发生 drop（Esc 取消/丢到窗口外）
-            self._end_drag()
-            self._relayout()  # 恢复悬停预览偏移之前的布局
-
     def _cell_of(self, path):
         """路径在当前页的格子；不在当前页（如过滤中）返回 (-1, -1)。"""
         try:
@@ -729,6 +1049,11 @@ class IconGrid(QListWidget):
 
     def _update_drag(self, pos, force=False):
         self._cursor_pos = pos
+        self._drag_image.follow(self._viewport_global(pos))
+        if self._page_bar is not None:
+            # 拖动时鼠标事件被视口独占，翻页栏收不到移动：由网格代转，
+            # 光标停在页位点上就翻页（跨页整理的另一种方式）
+            self._page_bar.hover_at(self._viewport_global(pos))
         cell = self._slot_at(pos)
         zone = self._zone_at(pos, cell)
         if force or cell != self._target_cell or zone != self._drop_zone:
@@ -736,6 +1061,10 @@ class IconGrid(QListWidget):
             self._drop_zone = zone
             self._apply_drag_preview(cell)
             self.viewport().update()
+
+    def _viewport_global(self, pos):
+        """视口局部坐标 → 全局坐标。"""
+        return self.viewport().mapToGlobal(pos)
 
     def _zone_at(self, pos, cell):
         """光标在落点格子内的横向分区：'left'（插前）/ 'center'（互换）/ 'right'（插后）。
@@ -758,6 +1087,10 @@ class IconGrid(QListWidget):
         path = self._drag_path
         self._end_drag()
         if path is None or path not in self._items:
+            return
+        if not self.viewport().rect().contains(pos):
+            # 松手在视口外（翻页栏/工具条/窗口外）= 取消本次拖动
+            self._relayout()
             return
         try:
             o_idx = self._order.index(path)
@@ -915,6 +1248,12 @@ class IconGrid(QListWidget):
 
     def _end_drag(self):
         self._drag_active = False
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        self._drag_image.hide()
+        if self._page_bar is not None:
+            self._page_bar.clear_hover()
         self._drag_anim.stop()
         self._anim_from = {}
         self._anim_to = {}
@@ -940,12 +1279,77 @@ class IconGrid(QListWidget):
     # ---- 落点阴影绘制 ----
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self._drag_active:
-            return
         try:
-            self._paint_drag_ghost()
+            if self._drag_active:
+                self._paint_drag_ghost()
+            self._paint_badges()
+            if self._file_hover:
+                self._paint_file_hint()
         except RuntimeError:  # 拖拽中条目被 populate 清空
             self._end_drag()
+
+    def _paint_badges(self):
+        """选择模式的角标：已添加过的条目在图标右上角画个对勾。"""
+        c = theme_colors()
+        painter = None
+        for i in range(self.count()):
+            if self.isRowHidden(i):
+                continue
+            item = self.item(i)
+            if item is None:
+                continue
+            try:
+                badge = item.data(BADGE_ROLE)
+                if not badge:
+                    continue
+                rect = self.visualItemRect(item)
+            except RuntimeError:
+                continue
+            if rect.isNull():
+                continue
+            if painter is None:
+                painter = QPainter(self.viewport())
+                painter.setRenderHint(QPainter.Antialiasing)
+            radius = max(6.0, min(9.0, rect.width() * 0.09))
+            center = QPointF(rect.right() - radius - 2, rect.top() + radius + 2)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(c["selected"]))
+            painter.drawEllipse(center, radius, radius)
+            pen = QPen(QColor(c["text"]))
+            pen.setWidthF(max(1.4, radius * 0.24))
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolyline(QPolygonF([
+                QPointF(center.x() - radius * 0.45, center.y()),
+                QPointF(center.x() - radius * 0.12, center.y() + radius * 0.34),
+                QPointF(center.x() + radius * 0.46, center.y() - radius * 0.36),
+            ]))
+        if painter is not None:
+            painter.end()
+
+    def _paint_file_hint(self):
+        """外部文件拖到网格上时提示「松开即可添加」。"""
+        c = theme_colors()
+        rect = self.viewport().rect().adjusted(6, 6, -6, -6)
+        painter = QPainter(self.viewport())
+        painter.setRenderHint(QPainter.Antialiasing)
+        # 半透明提示：只轻铺一层，图标仍然看得清（拖放时用户还要挑落点）
+        fill = QColor(c["selected"])
+        fill.setAlpha(90)
+        pen = QPen(QColor(c["text"]))
+        pen.setWidth(2)
+        pen.setStyle(Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(fill)
+        painter.drawRoundedRect(rect, 12, 12)
+        painter.setPen(QColor(c["text"]))
+        font = painter.font()
+        font.setPointSizeF(max(10.0, self._cell.width() * 0.16))
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignCenter, "松开鼠标即可添加到图标桌面")
+        painter.end()
 
     def _paint_drag_ghost(self):
         if self._ghost_cell[0] < 0 or self._ghost_cell == self._origin_cell:
@@ -988,23 +1392,32 @@ class IconGrid(QListWidget):
 class PageBar(QWidget):
     """右侧翻页栏：上下箭头 + 每页一个页位点，当前页显示为长条。
 
-    样式保持极简：不画底板，只用主题色画箭头与页位点；点击箭头/页位点翻页
-    或跳转，滚轮直接翻页。只有一页时整个栏自动隐藏。
+    样式保持极简：不画底板，只用主题色画箭头与页位点；箭头点击翻页，
+    页位点鼠标放上去即翻页（拖动图标时同样生效——把图标拖到其他页就靠
+    它），滚轮直接翻页。只有一页时整个栏自动隐藏。
     """
 
     page_requested = Signal(int)    # 目标页（0 基）
+    files_dropped = Signal(list)    # 外部拖入的 exe/lnk 路径
 
     WIDTH = 26
     ARROW = 22                      # 上下箭头区高度
+    HOVER_DELAY = 130               # 悬停在页位点上多久触发翻页（毫秒）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current = 0
         self._total = 1
         self._hover = None          # 'prev' | 'next' | 页序号 | None
+        self._pending = None        # 悬停中待跳转的页
         self.setFixedWidth(self.WIDTH)
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptDrops(True)   # 接收内部拖拽 → 拖动中悬停即可翻页
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(self.HOVER_DELAY)
+        self._hover_timer.timeout.connect(self._commit_hover_page)
 
     def set_pages(self, current, total):
         total = max(1, int(total))
@@ -1043,17 +1456,45 @@ class PageBar(QWidget):
 
     # ---- 交互 ----
     def mouseMoveEvent(self, event):
-        hit = self._hit_test(event.position().toPoint())
-        if hit != self._hover:
-            self._hover = hit
-            self.update()
+        self._set_hover(self._hit_test(event.position().toPoint()))
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
-        if self._hover is not None:
-            self._hover = None
-            self.update()
+        self._set_hover(None)
         super().leaveEvent(event)
+
+    def _set_hover(self, hit):
+        """更新悬停命中；停在某个页位点上就预备翻页（短暂停留后生效）。
+
+        停留判定而不是立即翻页：鼠标横穿翻页栏时不会误翻页；拖动图标
+        停在某页的点上则马上翻到那一页。
+        """
+        if hit != self._hover:
+            self._hover = hit
+            self.update()
+        want = hit if isinstance(hit, int) and hit != self._current else None
+        if want == self._pending:
+            return
+        self._pending = want
+        if want is None:
+            self._hover_timer.stop()
+        else:
+            self._hover_timer.start()
+
+    def _commit_hover_page(self):
+        page, self._pending = self._pending, None
+        if page is not None and page != self._current:
+            self.page_requested.emit(page)
+
+    def hover_at(self, global_pos):
+        """按全局坐标更新悬停（拖动图标时鼠标被网格独占，由网格代转）。"""
+        if not self.isVisible():
+            self._set_hover(None)
+            return
+        self._set_hover(self._hit_test(self.mapFromGlobal(global_pos)))
+
+    def clear_hover(self):
+        self._set_hover(None)
 
     def mousePressEvent(self, event):
         hit = self._hit_test(event.position().toPoint())
@@ -1072,6 +1513,33 @@ class PageBar(QWidget):
         if delta:
             self.page_requested.emit(self._current + (1 if delta < 0 else -1))
         event.accept()
+
+    # ---- 拖放（只处理外部文件：落到翻页栏上的 exe/lnk 也要能添加）----
+    def dragEnterEvent(self, event):
+        if scanner.file_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        # 拖文件时不翻页（避免页面乱跳）；图标拖拽不走 Qt 拖放（网格自管）
+        if scanner.file_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_hover(None)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self._set_hover(None)
+        paths = scanner.file_paths_from_mime(event.mimeData())
+        if paths:
+            self.files_dropped.emit(paths)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     # ---- 绘制 ----
     def paintEvent(self, event):

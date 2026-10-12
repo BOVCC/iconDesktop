@@ -6,6 +6,9 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 测试断言「数据目录 = 程序目录」，需先清掉便携版注入的环境变量
+# （机器上全局设了 ICONDESKTOP_CONFIG_LOCATION=appdata 时否则会误报失败）
+os.environ.pop("ICONDESKTOP_CONFIG_LOCATION", None)
 
 from PySide6.QtNetwork import QLocalServer  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402

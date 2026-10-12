@@ -22,102 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 from app import lnk_utils, scanner, title_bar
+from app.all_shortcuts_dialog import AllShortcutsDialog
 from app.config import Config
 from app.icon_grid import IconGrid, PageBar
-from app.theme import apply_theme, apply_titlebar_theme
+from app.theme import apply_theme, apply_titlebar_theme, build_style
 from app.theme import colors as theme_colors
-
-
-def build_style(c):
-    """叶子控件样式表：颜色取自当前主题，切换主题后需重新调用。"""
-    return f"""
-QListWidget {{
-    background: {c['bg']};
-    border: none;
-}}
-QListWidget::item {{
-    border-radius: 8px;
-    padding: 4px 2px;
-    color: {c['text']};
-}}
-QListWidget::item:hover {{
-    background: {c['hover']};
-}}
-QListWidget::item:selected {{
-    background: {c['selected']};
-    color: {c['text']};
-}}
-QLineEdit#search {{
-    background: {c['field']};
-    color: {c['text']};
-    border: 1px solid {c['border']};
-    border-radius: 15px;
-    padding: 5px 12px;
-}}
-QWidget#titlebar {{
-    background: {c['titlebar']};
-    border-bottom: 1px solid {c['border']};
-}}
-QWidget#titlebar QLabel {{
-    background: transparent;
-    color: {c['text']};
-}}
-QWidget#topbar {{
-    background: {c['titlebar']};
-    border-bottom: 1px solid {c['border']};
-}}
-QWidget#topbar QPushButton {{
-    background: {c['button']};
-    color: {c['text']};
-    border: 1px solid {c['border']};
-    border-radius: 6px;
-    padding: 6px 14px;
-}}
-QWidget#topbar QPushButton:hover {{
-    background: {c['hover']};
-}}
-QWidget#topbar QPushButton:pressed {{
-    background: {c['selected']};
-}}
-QWidget#topbar QToolButton {{
-    background: {c['button']};
-    color: {c['text']};
-    border: 1px solid {c['border']};
-    border-radius: 6px;
-    padding: 6px 12px;
-}}
-QWidget#topbar QToolButton:hover {{
-    background: {c['hover']};
-}}
-QWidget#topbar QToolButton:pressed {{
-    background: {c['selected']};
-}}
-QWidget#topbar QToolButton::menu-indicator {{
-    subcontrol-origin: padding;
-    subcontrol-position: center right;
-    right: 4px;
-}}
-QToolButton#winbtn {{
-    background: transparent;
-    border: none;
-}}
-QToolButton#winbtn:hover {{
-    background: {c['hover']};
-}}
-QToolButton#winbtn:pressed {{
-    background: {c['selected']};
-}}
-QToolButton#closebtn {{
-    background: transparent;
-    border: none;
-}}
-QToolButton#closebtn:hover {{
-    background: #e81123;
-}}
-QToolButton#closebtn:pressed {{
-    background: #c50f1f;
-}}
-"""
 
 
 def _app_icon_paths():
@@ -196,8 +105,13 @@ class MainWindow(QMainWindow):
         add_exe_btn = QPushButton("添加EXE")
         add_exe_btn.clicked.connect(self.add_exe_files)
 
+        all_shortcuts_btn = QPushButton("全部快捷方式")
+        all_shortcuts_btn.setToolTip("从开始菜单和桌面里挑快捷方式加入图标桌面")
+        all_shortcuts_btn.clicked.connect(self.open_all_shortcuts)
+
         refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self._reload_apps)
+        refresh_btn.setToolTip("重新扫描快捷方式文件夹，并重新提取图标")
+        refresh_btn.clicked.connect(self._refresh_apps)
 
         topbar = QWidget()
         topbar.setObjectName("topbar")
@@ -206,6 +120,7 @@ class MainWindow(QMainWindow):
         top.setSpacing(8)
         top.addWidget(self.search_box, 1)
         top.addWidget(add_exe_btn)
+        top.addWidget(all_shortcuts_btn)
         top.addWidget(refresh_btn)
         top.addWidget(self._build_settings_button())
 
@@ -219,11 +134,15 @@ class MainWindow(QMainWindow):
         self.grid.layout_changed.connect(self._persist_layout)
         self.grid.page_changed.connect(self._on_page_changed)
         self.grid.scale_changed.connect(self._on_scale_changed)
+        self.grid.files_dropped.connect(self.add_files)
         self.search_box.textChanged.connect(self.grid.filter)
 
         self.page_bar = PageBar()
         self.grid.page_changed.connect(self.page_bar.set_pages)
         self.page_bar.page_requested.connect(self.grid.goto_page)
+        self.page_bar.files_dropped.connect(self.add_files)
+        # 拖动图标时鼠标被网格独占，翻页栏的悬停翻页由网格按光标位置代转
+        self.grid.set_page_bar(self.page_bar)
 
         central = QWidget()
         outer = QVBoxLayout(central)
@@ -239,6 +158,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.page_bar)
         outer.addWidget(body, 1)
         self.setCentralWidget(central)
+        # 拖放 exe/lnk 到窗口任何位置都能添加（网格自己处理主体区域，
+        # 其余区域由本窗口接手）
+        self.setAcceptDrops(True)
 
         self._reload_apps()
 
@@ -380,6 +302,12 @@ class MainWindow(QMainWindow):
         return button
 
     # ---- 启动清理 ----
+    @staticmethod
+    def _scan_keys():
+        """当前「快捷方式」文件夹里的条目名称与路径（供配置清理用）。"""
+        scanned = scanner.scan_folder()
+        return {a["name"] for a in scanned}, {a["path"] for a in scanned}
+
     def startup_cleanup(self):
         """启动时执行：迁移旧版手动应用到快捷方式文件夹，并清理失效配置。
 
@@ -391,9 +319,7 @@ class MainWindow(QMainWindow):
             self._add_to_folder(app)
         self.config.legacy_manual_apps = []
 
-        scanned = scanner.scan_folder()
-        names = {a["name"] for a in scanned}
-        paths = {a["path"] for a in scanned}
+        names, paths = self._scan_keys()
         if self.config.prune_stale(names, paths):
             changed = True
         if changed:
@@ -407,6 +333,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "快捷方式文件夹为空：请将 .lnk/.exe 放入用户数据目录的「快捷方式」文件夹"
             )
+
+    def _refresh_apps(self):
+        """刷新：重新扫描文件夹并强制重新提取图标。
+
+        应用更新后图标会变，但外壳在进程内缓存了文件图标（实测连新 provider、
+        SHChangeNotify 都刷不掉），只重新扫描拿到的还是旧图标；这里先清掉图标
+        缓存（重新提取走直读文件资源），刷新就能看到新图标，不用重启程序。
+        """
+        self.grid.reload_icons()
+        self._reload_apps()
+        self.statusBar().showMessage(f"已刷新 {self.grid.count()} 个应用", 3000)
 
     def _persist_layout(self):
         """保存图标顺序；拖拽落位后立即调用，防托盘常驻时丢布局。"""
@@ -441,12 +378,19 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             return
+        self.add_files(paths)
+
+    def add_files(self, paths):
+        """把一批 exe/lnk 加入「快捷方式」文件夹（选择框与拖放共用）。"""
         added = 0
         for path in paths:
+            path = os.path.normpath(str(path))
+            if not path.lower().endswith(scanner.ENTRY_SUFFIXES):
+                continue
             name = os.path.splitext(os.path.basename(path))[0]
             data = {
                 "name": name,
-                "path": os.path.normpath(path),
+                "path": path,
                 "args": "",
                 "workdir": "",
             }
@@ -454,6 +398,48 @@ class MainWindow(QMainWindow):
                 added += 1
         if added:
             self._reload_apps()
+            self.statusBar().showMessage(f"已添加 {added} 个应用", 4000)
+        return added
+
+    def open_all_shortcuts(self):
+        """打开「全部快捷方式」窗口：多选开始菜单/桌面上的快捷方式后加入。"""
+        dialog = AllShortcutsDialog(self)
+        if dialog.exec() != AllShortcutsDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_apps()
+        if not chosen:
+            return
+        added = 0
+        for app in chosen:
+            if self._add_to_folder(app):
+                added += 1
+        self._reload_apps()
+        self.statusBar().showMessage(
+            f"已从开始菜单/桌面添加 {added} 个快捷方式", 4000
+        )
+
+    # ---- 拖放添加 ----
+    # 网格区由 IconGrid 自己的拖放处理（拖图标整理 + 接收外部文件），
+    # 顶部工具条、标题栏、翻页栏等区域由窗口接手，落在窗口任何地方都能添加
+    def dragEnterEvent(self, event):
+        if scanner.file_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if scanner.file_paths_from_mime(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = scanner.file_paths_from_mime(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.add_files(paths)
 
     def _add_to_folder(self, app):
         """把选中的程序以快捷方式形式放入「快捷方式」文件夹。
@@ -505,8 +491,15 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "删除失败", f"无法删除 {os.path.basename(path)}：{exc}")
             return
-        # 重新扫描并清理配置里已失效的隐藏/排序/坐标
-        self.startup_cleanup()
+        # 清理配置里已失效的排序/隐藏信息，然后无条件刷新界面。
+        # 不能按「配置有没有变化」来决定是否重载：刚通过拖放/添加EXE 加进来、
+        # 还没写进配置的条目被删除时，配置本身并不会变化，界面就会留着已经
+        # 删掉的图标（要点一次刷新才消失）。顺序同时立刻落盘。
+        names, paths = self._scan_keys()
+        self.config.prune_stale(names, paths)
+        self.grid.forget_icon(path)
+        self._reload_apps()
+        self._persist_layout()
         self.statusBar().showMessage(f"已删除: {app['name']}", 4000)
 
     # ---- 启动反馈 ----

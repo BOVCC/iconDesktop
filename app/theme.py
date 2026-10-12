@@ -97,3 +97,110 @@ def apply_titlebar_theme(widget, theme=DEFAULT_MODE):
                 break
     except Exception:
         pass
+
+
+def build_style(c):
+    """叶子控件样式表：颜色取自当前主题，切换主题后需重新调用。
+
+    主窗口与「全部快捷方式」窗口共用（后者容器沿用 topbar / search 等
+    objectName，即可获得与图标桌面一致的外观）。
+    """
+    return f"""
+QListWidget {{
+    background: {c['bg']};
+    border: none;
+}}
+QListWidget::item {{
+    border-radius: 8px;
+    padding: 4px 2px;
+    color: {c['text']};
+}}
+QListWidget::item:hover {{
+    background: {c['hover']};
+}}
+QListWidget::item:selected {{
+    background: {c['selected']};
+    color: {c['text']};
+}}
+QLineEdit#search {{
+    background: {c['field']};
+    color: {c['text']};
+    border: 1px solid {c['border']};
+    border-radius: 15px;
+    padding: 5px 12px;
+}}
+QWidget#titlebar {{
+    background: {c['titlebar']};
+    border-bottom: 1px solid {c['border']};
+}}
+QWidget#titlebar QLabel {{
+    background: transparent;
+    color: {c['text']};
+}}
+QWidget#topbar {{
+    background: {c['titlebar']};
+    border-bottom: 1px solid {c['border']};
+}}
+QWidget#footerbar {{
+    background: {c['titlebar']};
+    border-top: 1px solid {c['border']};
+}}
+QWidget#topbar QPushButton, QWidget#footerbar QPushButton {{
+    background: {c['button']};
+    color: {c['text']};
+    border: 1px solid {c['border']};
+    border-radius: 6px;
+    padding: 6px 14px;
+}}
+QWidget#topbar QPushButton:hover, QWidget#footerbar QPushButton:hover {{
+    background: {c['hover']};
+}}
+QWidget#topbar QPushButton:pressed, QWidget#footerbar QPushButton:pressed {{
+    background: {c['selected']};
+}}
+QWidget#topbar QPushButton:disabled, QWidget#footerbar QPushButton:disabled {{
+    color: {c['disabled']};
+}}
+QWidget#topbar QLabel, QWidget#footerbar QLabel {{
+    background: transparent;
+    color: {c['text']};
+}}
+QWidget#topbar QToolButton {{
+    background: {c['button']};
+    color: {c['text']};
+    border: 1px solid {c['border']};
+    border-radius: 6px;
+    padding: 6px 12px;
+}}
+QWidget#topbar QToolButton:hover {{
+    background: {c['hover']};
+}}
+QWidget#topbar QToolButton:pressed {{
+    background: {c['selected']};
+}}
+QWidget#topbar QToolButton::menu-indicator {{
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    right: 4px;
+}}
+QToolButton#winbtn {{
+    background: transparent;
+    border: none;
+}}
+QToolButton#winbtn:hover {{
+    background: {c['hover']};
+}}
+QToolButton#winbtn:pressed {{
+    background: {c['selected']};
+}}
+QToolButton#closebtn {{
+    background: transparent;
+    border: none;
+}}
+QToolButton#closebtn:hover {{
+    background: #e81123;
+}}
+QToolButton#closebtn:pressed {{
+    background: #c50f1f;
+}}
+"""

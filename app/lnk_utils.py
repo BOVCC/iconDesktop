@@ -82,22 +82,29 @@ def create_shortcut(folder, name, target, args="", workdir="", icon_location="")
 
 
 def icon_source(lnk_path):
-    """返回可提取“无快捷方式箭头”图标的文件路径，失败返回空串。
+    """返回 (图标文件, 图标索引)；失败返回 ("", 0)。
 
-    .lnk 自身经 QFileIconProvider 提取会带蓝色箭头覆盖，这里改为从 lnk 的
-    自定义图标位置（IconLocation，形如 "path,index"）或目标文件提取；
-    两者都无效时返回空串，由调用方回退为 lnk 自身图标。
+    .lnk 自身经外壳提取会带蓝色箭头覆盖，这里改为从 lnk 的自定义图标位置
+    （IconLocation，形如 "path,index"）或目标文件提取；索引一并返回，让
+    "app.exe,3" 这类指定第 N 个图标的快捷方式真正生效（外壳路径只会给出
+    文件的第一个图标）。两者都无效时返回 ("", 0)，由调用方回退为 lnk 自身
+    图标。
     """
     if not str(lnk_path).lower().endswith(".lnk") or not os.path.exists(lnk_path):
-        return ""
+        return "", 0
     try:
         shortcut = _get_shell().CreateShortCut(str(lnk_path))
         icon_location = shortcut.IconLocation or ""
         target = shortcut.Targetpath or ""
     except Exception:
-        return ""
+        return "", 0
     for candidate in (icon_location, target):
-        file_path = candidate.split(",")[0].strip()
-        if file_path and os.path.exists(file_path):
-            return file_path
-    return ""
+        file_path, _, raw_index = str(candidate).partition(",")
+        file_path = file_path.strip()
+        if not file_path or not os.path.exists(file_path):
+            continue
+        try:
+            return file_path, int(raw_index)
+        except ValueError:
+            return file_path, 0
+    return "", 0

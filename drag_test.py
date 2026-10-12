@@ -40,9 +40,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.icon_grid import ICON_RENDER_SIZE, MIN_CELL_W, IconGrid, PageBar  # noqa: E402
 
-# 离屏测试没有真实拖拽循环：把 QDrag.exec 换成空转，让合成鼠标事件继续
-# 驱动 _update_drag/_finish_drag（真实运行时 _exec_drag 阻塞到松手/取消）
-IconGrid._exec_drag = lambda self, drag: None
+# 自管拖拽（不走 QDrag/OLE 模态循环）没有阻塞循环要跳过：合成鼠标事件
+# 直接就是真实路径，跨页整理（拖动中滚轮）也一并覆盖
 
 
 def make_event(etype, pos, button, buttons):
@@ -457,30 +456,42 @@ def main():
     assert names(grid) == ["App00", "App01", "App07", "App03", "App04", "App05", "App06", "App02"], names(grid)
     print("[OK] 格子内分区：中间图标边缘可插入，格子内横移切换插入/互换")
 
-    # 20. 拖影像：QDrag 携带不透明的图标+名称像素图（尺寸=格子），热区在图内
+    # 20. 拖影浮层：拖动中显示不透明的「图标+名称」像素图（尺寸=格子），
+    #     热区跟手，且不吃鼠标事件；松手后隐藏（自管拖拽，不走 QDrag）
     grid = make_grid(8)
-    captured = {}
-
-    def capture_exec(self, drag):
-        captured["pixmap"] = drag.pixmap()
-        captured["hotspot"] = drag.hotSpot()
-        captured["cursor"] = drag.dragCursor(Qt.MoveAction)
-
-    (IconGrid)._exec_drag = capture_exec
+    cw, ch = grid._cell.width(), grid._cell.height()
     mouse_press(grid, item_center(grid, 1))
     mouse_move(grid, cell_center(grid, 3, 0) + QPoint(20, 0))
-    IconGrid._exec_drag = lambda self, drag: None  # 恢复默认空转
-    mouse_release(grid, cell_center(grid, 3, 0))
-    pix = captured["pixmap"]
-    cw, ch = grid._cell.width(), grid._cell.height()
-    assert not pix.isNull(), "QDrag 应携带拖影像素图"
-    assert (pix.width(), pix.height()) == (cw, ch), (
+    image = grid._drag_image
+    assert grid._drag_active, "拖拽应已激活"
+    assert image.isVisible(), "拖动中应显示拖影浮层"
+    pix = image._pixmap
+    dpr = pix.devicePixelRatio() or 1.0
+    assert not pix.isNull(), "拖影应有像素图"
+    assert (round(pix.width() / dpr), round(pix.height() / dpr)) == (cw, ch), (
         pix.width(), pix.height(), cw, ch
     )
-    hs = captured["hotspot"]
+    hs = image._hotspot
     assert 0 <= hs.x() <= cw and 0 <= hs.y() <= ch, "热区应在像素图内（跟手）"
-    assert not captured["cursor"].isNull(), "拖拽光标应设为自定义（透明，隐藏箭头）"
-    print("[OK] 拖影像素图随 QDrag 跟光标（不透明、热区跟手、无箭头光标）")
+    assert image.windowFlags() & Qt.WindowTransparentForInput, "拖影不应吃鼠标事件"
+    mouse_release(grid, cell_center(grid, 3, 0))
+    assert not image.isVisible(), "松手后拖影应隐藏"
+    print("[OK] 拖影浮层跟光标（尺寸=格子、热区跟手、不吃鼠标事件）")
+
+    # 20b. 自管拖拽的跨页整理：拖动中滚轮翻页（QDrag 的 OLE 模态循环里
+    #      滚轮要等拖拽结束才派发，因此这里必须是自管拖拽）
+    grid = make_grid(20)
+    assert grid.page_count() == 2
+    mouse_press(grid, item_center(grid, 0))
+    mouse_move(grid, cell_center(grid, 2, 0))
+    assert grid._drag_active
+    wheel(grid, -120)
+    assert grid.current_page() == 1, "拖动中滚轮向下应翻到下一页"
+    # 翻页后仍处于拖动态：松手把 App00 放到第 2 页的 App19 上（中间区 → 互换）
+    mouse_release(grid, cell_center(grid, 1, 0))
+    assert not grid._drag_active
+    assert names(grid)[0] == "App19" and names(grid)[19] == "App00", names(grid)
+    print("[OK] 拖动中滚轮翻页后可跨页落位")
 
     # 21. 图标归一化：外壳把小图标贴进大画布时（rustdesk/Magpie 等显示成
     #     小图的根因），裁出实际内容放大铺满；本就满幅的图标保持原样
