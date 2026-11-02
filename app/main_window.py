@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app import lnk_utils, scanner, title_bar
+from app import hotkey, lnk_utils, scanner, title_bar
 from app.all_shortcuts_dialog import AllShortcutsDialog
 from app.config import Config
 from app.icon_grid import IconGrid, PageBar
@@ -113,6 +113,14 @@ class MainWindow(QMainWindow):
         refresh_btn.setToolTip("重新扫描快捷方式文件夹，并重新提取图标")
         refresh_btn.clicked.connect(self._refresh_apps)
 
+        explorer_btn = QPushButton("资源管理器")
+        explorer_btn.setToolTip("把文件资源管理器（系统命令）加入图标桌面")
+        explorer_btn.clicked.connect(self.add_file_explorer)
+
+        folder_btn = QPushButton("打开文件夹")
+        folder_btn.setToolTip("打开存放快捷方式的文件夹")
+        folder_btn.clicked.connect(self.open_shortcut_folder)
+
         topbar = QWidget()
         topbar.setObjectName("topbar")
         top = QHBoxLayout(topbar)
@@ -122,6 +130,8 @@ class MainWindow(QMainWindow):
         top.addWidget(add_exe_btn)
         top.addWidget(all_shortcuts_btn)
         top.addWidget(refresh_btn)
+        top.addWidget(explorer_btn)
+        top.addWidget(folder_btn)
         top.addWidget(self._build_settings_button())
 
         # 图标网格 + 右侧翻页栏（仅一页时翻页栏自动隐藏）
@@ -131,6 +141,7 @@ class MainWindow(QMainWindow):
         self.grid.app_launched.connect(self._on_app_launched)
         self.grid.launch_failed.connect(self._on_launch_failed)
         self.grid.delete_requested.connect(self.delete_app)
+        self.grid.open_folder_requested.connect(self.open_app_folder)
         self.grid.layout_changed.connect(self._persist_layout)
         self.grid.page_changed.connect(self._on_page_changed)
         self.grid.scale_changed.connect(self._on_scale_changed)
@@ -162,7 +173,32 @@ class MainWindow(QMainWindow):
         # 其余区域由本窗口接手）
         self.setAcceptDrops(True)
 
+        # 全局快捷键 Win+Space：显示/隐藏主窗口（注册在 showEvent 里做，
+        # 因为要等窗口拿到原生句柄）
+        self.hotkey = hotkey.GlobalHotkey(self)
+        self.hotkey.triggered.connect(self._toggle_from_tray)
+        self._hotkey_ready = False
+
         self._reload_apps()
+
+    # ---- 全局快捷键 ----
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._setup_hotkey()
+
+    def _setup_hotkey(self):
+        """注册 Win+Space（幂等：窗口反复显示时不重复注册）。"""
+        if self._hotkey_ready or not self.config.settings.get("global_hotkey", True):
+            return
+        self._hotkey_ready = True
+        try:
+            hwnd = int(self.winId())
+        except (TypeError, ValueError):
+            return
+        if not self.hotkey.register(hwnd):
+            self.statusBar().showMessage(
+                "Win+Space 快捷键注册失败（可能已被其它程序占用）", 5000
+            )
 
     # ---- 主题 ----
     def _apply_theme(self):
@@ -196,6 +232,10 @@ class MainWindow(QMainWindow):
 
     def nativeEvent(self, eventType, message):
         """窗口原生消息：缩放光标 + WM_NCHITTEST + 最大化标题栏拖动/双击。"""
+        # 全局快捷键（RegisterHotKey 路线）投递的 WM_HOTKEY
+        hotkey_obj = getattr(self, "hotkey", None)
+        if hotkey_obj is not None and hotkey_obj.handle_native(eventType, message):
+            return True, 0
         cursor = title_bar.handle_set_cursor(eventType, message)
         if cursor is not None:
             return True, cursor
@@ -281,6 +321,14 @@ class MainWindow(QMainWindow):
         )
         self.minimize_action.toggled.connect(self._on_minimize_toggled)
         menu.addAction(self.minimize_action)
+        menu.addSeparator()
+
+        self.hotkey_action = QAction("Win+Space 显示/隐藏", menu, checkable=True)
+        self.hotkey_action.setChecked(
+            bool(self.config.settings.get("global_hotkey", True))
+        )
+        self.hotkey_action.toggled.connect(self._on_hotkey_toggled)
+        menu.addAction(self.hotkey_action)
         menu.addSeparator()
 
         group = QActionGroup(menu)
@@ -381,8 +429,14 @@ class MainWindow(QMainWindow):
         self.add_files(paths)
 
     def add_files(self, paths):
-        """把一批 exe/lnk 加入「快捷方式」文件夹（选择框与拖放共用）。"""
+        """把一批 exe/lnk 加入「快捷方式」文件夹（选择框与拖放共用）。
+
+        同一个程序重复添加会被识别出来并复用已有快捷方式，不再生成
+        "名称 (2).lnk" 之类的重复项。
+        """
         added = 0
+        duplicated = 0
+        skipped = 0
         for path in paths:
             path = os.path.normpath(str(path))
             if not path.lower().endswith(scanner.ENTRY_SUFFIXES):
@@ -394,11 +448,23 @@ class MainWindow(QMainWindow):
                 "args": "",
                 "workdir": "",
             }
-            if self._add_to_folder(data):
+            status = self._add_to_folder_status(data)
+            if status == "added":
                 added += 1
+            elif status == "duplicate":
+                duplicated += 1
+            elif status == "skipped":
+                skipped += 1
         if added:
             self._reload_apps()
-            self.statusBar().showMessage(f"已添加 {added} 个应用", 4000)
+        parts = []
+        if added:
+            parts.append(f"已添加 {added} 个应用")
+        if duplicated:
+            parts.append(f"{duplicated} 个已存在（未重复添加）")
+        if skipped:
+            parts.append(f"{skipped} 个目标文件不存在")
+        self.statusBar().showMessage("，".join(parts) or "没有可添加的应用", 4000)
         return added
 
     def open_all_shortcuts(self):
@@ -410,13 +476,19 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
         added = 0
+        duplicated = 0
         for app in chosen:
-            if self._add_to_folder(app):
+            status = self._add_to_folder_status(app)
+            if status == "added":
                 added += 1
-        self._reload_apps()
-        self.statusBar().showMessage(
-            f"已从开始菜单/桌面添加 {added} 个快捷方式", 4000
-        )
+            elif status == "duplicate":
+                duplicated += 1
+        if added:
+            self._reload_apps()
+        message = f"已从开始菜单/桌面添加 {added} 个快捷方式"
+        if duplicated:
+            message += f"（{duplicated} 个已存在）"
+        self.statusBar().showMessage(message, 4000)
 
     # ---- 拖放添加 ----
     # 网格区由 IconGrid 自己的拖放处理（拖图标整理 + 接收外部文件），
@@ -444,11 +516,23 @@ class MainWindow(QMainWindow):
     def _add_to_folder(self, app):
         """把选中的程序以快捷方式形式放入「快捷方式」文件夹。
 
-        目标已失效（文件不存在）时直接忽略并返回 False，由调用方决定提示。
+        返回是否真的新建了快捷方式（已存在、目标失效、创建失败都返回
+        False）；需要区分具体原因时用 _add_to_folder_status。
+        """
+        return self._add_to_folder_status(app) == "added"
+
+    def _add_to_folder_status(self, app):
+        """把选中的程序以快捷方式形式放入「快捷方式」文件夹。
+
+        返回处理结果：
+        - "added"：新建了快捷方式
+        - "duplicate"：文件夹里已有指向同一目标的快捷方式，直接复用
+        - "skipped"：目标文件不存在，已忽略
+        - "failed"：创建失败（已弹出提示）
         """
         path = app["path"]
         if not path or not os.path.exists(path):
-            return False
+            return "skipped"
         name = app["name"]
         args = app.get("args", "")
         workdir = app.get("workdir", "")
@@ -457,6 +541,9 @@ class MainWindow(QMainWindow):
             if path.lower().endswith(".lnk"):
                 target, src_args, src_workdir = lnk_utils.resolve_lnk(path)
                 if target:
+                    # 同一个程序已经在图标桌面上了 → 不再重复添加
+                    if lnk_utils.find_by_target(folder, target):
+                        return "duplicate"
                     lnk_utils.create_shortcut(
                         folder,
                         name,
@@ -466,14 +553,73 @@ class MainWindow(QMainWindow):
                         lnk_utils.get_icon_location(path),
                     )
                 else:
-                    # 解析不出目标（如商店应用）：原样复制，保留全部信息
+                    # 解析不出目标（如商店应用）：原样复制，保留全部信息。
+                    # 这种快捷方式没法按目标比对，改按内容比对是否已复制过
+                    existing = lnk_utils.find_duplicate_copy(folder, path)
+                    if existing:
+                        return "duplicate"
                     shutil.copyfile(path, lnk_utils.unique_lnk_path(folder, name))
             else:
+                # 已存在指向同一目标的快捷方式时复用它，不再新建
+                if lnk_utils.find_by_target(folder, path):
+                    return "duplicate"
                 lnk_utils.create_shortcut(folder, name, path, args, workdir)
         except Exception as exc:
             QMessageBox.warning(self, "添加失败", f"无法创建快捷方式：{exc}")
-            return False
-        return True
+            return "failed"
+        return "added"
+
+    def add_file_explorer(self):
+        """把文件资源管理器加入图标桌面。
+
+        它不是"应用"而是一条系统命令（explorer.exe），但照样按现有方式
+        生成为「快捷方式」文件夹里的 .lnk：图标、启动、右键删除等行为
+        与其它图标完全一致。
+        """
+        target = scanner.explorer_path()
+        if not target:
+            QMessageBox.warning(self, "添加失败", "找不到系统的文件资源管理器")
+            return
+        status = self._add_to_folder_status(
+            {
+                "name": "文件资源管理器",
+                "path": target,
+                "args": "",
+                "workdir": "",
+            }
+        )
+        if status == "added":
+            self._reload_apps()
+            self.statusBar().showMessage("已添加文件资源管理器", 4000)
+        elif status == "duplicate":
+            self.statusBar().showMessage("文件资源管理器已在图标桌面上了", 4000)
+
+    def open_shortcut_folder(self):
+        """打开存放快捷方式的文件夹（资源文件夹）。"""
+        folder = scanner.shortcut_folder()
+        if not scanner.open_in_explorer(str(folder)):
+            QMessageBox.warning(self, "打开失败", f"无法打开文件夹：{folder}")
+
+    def open_app_folder(self, app):
+        """打开某个图标所在文件夹。
+
+        图标本身是「快捷方式」文件夹里的 .lnk，真正有用的是它指向的
+        程序所在目录：因此先解析目标再定位；目标解析不出来或已失效，
+        才退回快捷方式文件自己所在的目录。
+        """
+        path = str(app.get("path") or "")
+        if not path:
+            return
+        target = path
+        if path.lower().endswith(".lnk"):
+            resolved, _, _ = lnk_utils.resolve_lnk(path)
+            # 目标失效（如商店应用、已卸载的程序）时用快捷方式自己的目录
+            if resolved and os.path.exists(resolved):
+                target = resolved
+        if not scanner.open_folder_of(target):
+            QMessageBox.warning(
+                self, "打开失败", f"无法打开文件夹：\n{os.path.dirname(target)}"
+            )
 
     def delete_app(self, app):
         """删除图标：连同「快捷方式」文件夹里的对应文件一并删除。"""
@@ -523,6 +669,17 @@ class MainWindow(QMainWindow):
         self.config.settings["minimize_after_launch"] = checked
         self.config.save()
 
+    def _on_hotkey_toggled(self, checked):
+        """开关 Win+Space 全局快捷键。"""
+        self.config.settings["global_hotkey"] = bool(checked)
+        self.config.save()
+        if checked:
+            self._hotkey_ready = False
+            self._setup_hotkey()
+        elif self.hotkey is not None:
+            self.hotkey.unregister()
+            self._hotkey_ready = True   # 已关闭，不再重复注册
+
     def _on_launch_mode_changed(self):
         mode = "click" if self.click_action.isChecked() else "double"
         self.config.settings["launch_on"] = mode
@@ -570,6 +727,8 @@ class MainWindow(QMainWindow):
         """
         self._force_quit = True
         self._save_state()
+        if getattr(self, "hotkey", None) is not None:
+            self.hotkey.unregister()
         QApplication.quit()
 
     # ---- 退出前持久化 ----

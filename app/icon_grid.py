@@ -130,6 +130,7 @@ class IconGrid(QListWidget):
     app_launched = Signal(dict)
     launch_failed = Signal(str)
     delete_requested = Signal(dict)
+    open_folder_requested = Signal(dict)  # 右键「打开所在文件夹」
     layout_changed = Signal()       # 拖拽落位后发出，供主窗口立即保存顺序
     page_changed = Signal(int, int)  # (当前页, 总页数)，均为 0 基
     scale_changed = Signal(float)    # 缩放级别变化（供配置保存）
@@ -724,10 +725,13 @@ class IconGrid(QListWidget):
         app = item.data(DATA_ROLE)
         menu = QMenu(self)
         act_open = menu.addAction("打开(&O)")
+        act_folder = menu.addAction("打开所在文件夹(&F)")
         act_delete = menu.addAction("删除(&D)")
         chosen = menu.exec(self.mapToGlobal(pos))
         if chosen is act_open:
             self._launch(item)
+        elif chosen is act_folder:
+            self.open_folder_requested.emit(app)
         elif chosen is act_delete:
             self.delete_requested.emit(app)
 

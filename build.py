@@ -254,6 +254,25 @@ def tree_size(p: Path) -> int:
     return total
 
 
+def ensure_product_writable(product: Path) -> None:
+    """产物 exe 正在运行时文件被锁住，打包必然失败——先给出清楚的提示。
+
+    Windows 上运行中的 exe 无法以写入方式打开，借此判断程序是否还在跑。
+    """
+    if not product.is_file():
+        return
+    try:
+        with open(product, "r+b"):
+            pass
+    except PermissionError:
+        fail(
+            f"产物正在运行，无法覆盖：{product}\n"
+            "请先退出该程序（或在托盘菜单里点「退出」）再重新打包。"
+        )
+    except OSError:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="按 build_config.json 调用 PyInstaller 打包 iconDesktop")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="配置文件路径（默认 build_config.json）")
@@ -285,6 +304,13 @@ def main() -> None:
     GENERATED_SPEC.write_text(spec_text, encoding="utf-8")
     write_config_hook(cfg)
 
+    product = (
+        (cfg["_dist"] / cfg["_product_name"])
+        if cfg["mode"] == "onedir"
+        else (cfg["_dist"] / f"{cfg['_product_name']}.exe")
+    )
+    ensure_product_writable(product)
+
     cmd = [
         cfg["_python"], "-m", "PyInstaller",
         str(GENERATED_SPEC),
@@ -314,8 +340,7 @@ def main() -> None:
         fail(f"PyInstaller 退出码 {result.returncode}，打包失败（用时 {elapsed:.1f} 秒）")
 
     product = (cfg["_dist"] / cfg["_product_name"]) if cfg["mode"] == "onedir" else (cfg["_dist"] / f"{cfg['_product_name']}.exe")
-    if not product.exists():
-        fail(f"打包结束但找不到产物：{product}")
+    if not product.exists():        fail(f"打包结束但找不到产物：{product}")
 
     size = tree_size(product)
     note = ""

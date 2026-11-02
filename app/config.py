@@ -28,6 +28,7 @@ DEFAULTS = {
         "minimize_after_launch": True,
         "theme": "dark",                  # light | dark
         "icon_scale": 1.0,                # 图标缩放级别，格子宽高比固定 2:3
+        "global_hotkey": True,            # Win+Space 显示/隐藏主窗口
     },
 }
 

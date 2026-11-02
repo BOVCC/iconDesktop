@@ -1,5 +1,6 @@
 """扫描 exe 同级「快捷方式」文件夹中的 .lnk / .exe 启动项。"""
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -81,3 +82,45 @@ def file_paths_from_mime(mime):
         seen.add(key)
         paths.append(os.path.normpath(path))
     return paths
+
+
+# ---- 系统命令与资源管理器 ----
+def explorer_path():
+    """系统文件资源管理器可执行文件路径（不存在时返回空串）。"""
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    candidate = os.path.join(root, "explorer.exe")
+    return candidate if os.path.isfile(candidate) else ""
+
+
+def open_in_explorer(folder):
+    """在资源管理器里打开一个文件夹；失败返回 False。
+
+    用 explorer.exe 而不是 os.startfile：后者走系统的默认程序关联，
+    在部分环境里文件夹可能被别的应用接管。explorer.exe 用绝对路径调用，
+    不依赖 PATH 里有没有它。
+    """
+    folder = str(folder)
+    if not os.path.isdir(folder):
+        return False
+    exe = explorer_path() or "explorer.exe"
+    try:
+        subprocess.Popen(
+            [exe, folder],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError:
+        return False
+    return True
+
+
+def open_folder_of(target):
+    """打开文件所在的文件夹；返回是否成功打开。
+
+    不用 explorer.exe 的 /select, 语法：那个写法在路径带空格时会被
+    Explorer 解析失败，它找不到路径就退回自己的默认目录（"文档"），
+    结果是无论点哪个图标都打开"文档"。这里老老实实打开所在文件夹。
+    """
+    target = str(target or "")
+    if not target:
+        return False
+    return open_in_explorer(os.path.dirname(target))
